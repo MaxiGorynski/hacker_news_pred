@@ -384,7 +384,7 @@ class Word2Vec:
 
 
 # Wikipedia processor for creating training data
-def process_wikipedia(wiki_dump_path, output_fil  e, max_articles=None):
+def process_wikipedia(wiki_dump_path, output_file, max_articles=None):
     """Process Wikipedia dump to text file for Word2Vec training"""
     import bz2
     from xml.etree import ElementTree as ET

@@ -11,6 +11,7 @@ import random
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import sklearn
 
 
 # ----------------------
@@ -555,9 +556,463 @@ def create_tiny_text8(text8_file, output_file, max_words=500000):
     print(f"Created tiny text8 corpus at {output_file}")
     return output_file
 
+# ----------------------
+# 3. Wikipedia Latest Pages Training
+# ----------------------
+
+def download_and_process_enwiki(data_dir="data"):
+    """Download and process English Wikipedia articles dump"""
+    import urllib.request
+    import bz2
+    import os
+    from tqdm import tqdm
+
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Define file paths
+    dump_url = "https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2"
+    dump_file = os.path.join(data_dir, "enwiki-latest-pages-articles.xml.bz2")
+    processed_file = os.path.join(data_dir, "enwiki-processed.txt")
+
+    # Download dump if needed
+    if not os.path.exists(dump_file):
+        print(f"Downloading English Wikipedia dump from {dump_url}...")
+        print("This is a large file (15-20GB) and may take a while...")
+
+        # Download with progress tracking
+        with tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1) as t:
+            def report_hook(b=1, bsize=1, tsize=None):
+                if tsize is not None:
+                    t.total = tsize
+                t.update(b * bsize - t.n)
+
+            urllib.request.urlretrieve(dump_url, dump_file, reporthook=report_hook)
+
+    # Process the XML directly from the compressed file to save disk space
+    if not os.path.exists(processed_file):
+        print("Processing Wikipedia dump...")
+
+        try:
+            # Attempt to use WikiExtractor if available
+            import subprocess
+            import shutil
+
+            extract_dir = os.path.join(data_dir, "wiki_extract")
+            os.makedirs(extract_dir, exist_ok=True)
+
+            print("Extracting text with WikiExtractor...")
+            subprocess.run([
+                "python", "-m", "wikiextractor.WikiExtractor",
+                dump_file,
+                "--output", extract_dir,
+                "--processes", "4",
+                "--json",
+                "--filter_disambig_pages",
+                "--min_text_length", "100"
+            ])
+
+            # Combine extracted files into a single text file
+            print("Combining extracted files...")
+            with open(processed_file, 'w', encoding='utf-8') as outf:
+                for root, _, files in os.walk(extract_dir):
+                    for file in files:
+                        if file.startswith('wiki_'):
+                            with open(os.path.join(root, file), 'r', encoding='utf-8') as inf:
+                                for line in inf:
+                                    try:
+                                        import json
+                                        article = json.loads(line)
+                                        text = article.get('text', '')
+                                        if text and len(text.split()) > 50:  # Minimum word count
+                                            # Basic preprocessing
+                                            text = text.replace('\n', ' ')
+                                            outf.write(text + '\n')
+                                    except:
+                                        continue
+
+            # Clean up extraction directory
+            shutil.rmtree(extract_dir)
+
+        except (ImportError, subprocess.SubprocessError):
+            print("WikiExtractor unavailable, falling back to basic processing...")
+
+            # Basic processing directly from bz2 file with chunk iterating
+            with open(processed_file, 'w', encoding='utf-8') as outf:
+                with bz2.open(dump_file, 'rt', encoding='utf-8', errors='ignore') as inf:
+                    # Skip XML and extract text content
+                    import re
+
+                    in_text = False
+                    current_text = []
+
+                    for line in tqdm(inf, desc="Processing Wikipedia XML"):
+                        if '<text' in line:
+                            in_text = True
+                            current_text = []
+                            # Extract text content between <text> tags
+                            text_content = re.search(r'<text[^>]*>(.*)', line)
+                            if text_content:
+                                current_text.append(text_content.group(1))
+                        elif '</text>' in line:
+                            in_text = False
+                            if current_text:
+                                # Get content before </text>
+                                end_content = re.search(r'(.*)</text>', line)
+                                if end_content:
+                                    current_text.append(end_content.group(1))
+
+                                # Process and write content
+                                text = ' '.join(current_text)
+                                # Remove wiki markup
+                                text = re.sub(r'\{\{.*?\}\}', ' ', text)  # Remove {{templates}}
+                                text = re.sub(r'\[\[.*?\]\]', ' ', text)  # Remove [[links]]
+                                text = re.sub(r'<.*?>', ' ', text)  # Remove HTML tags
+                                text = re.sub(r'https?://\S+', ' ', text)  # Remove URLs
+                                text = re.sub(r'[^\w\s]', ' ', text)  # Remove punctuation
+                                text = re.sub(r'\s+', ' ', text).strip()  # Normalize whitespace
+
+                                if len(text.split()) > 50:  # Minimum word count
+                                    outf.write(text + '\n')
+
+                                current_text = []
+                        elif in_text:
+                            current_text.append(line)
+
+    return processed_file
+
+
+def build_vocabulary_chunked(self, corpus_file, chunk_size=1000000):
+    """Build vocabulary in chunks to handle large corpora efficiently"""
+    print("Building vocabulary...")
+    from collections import Counter
+    from tqdm import tqdm
+
+    word_counts = Counter()
+
+    # Process file in chunks to avoid loading everything into memory
+    with open(corpus_file, 'r', encoding='utf-8', errors='ignore') as f:
+        chunk = []
+        for line in tqdm(f, desc="Counting words"):
+            chunk.append(line)
+
+            if len(chunk) >= chunk_size:
+                # Process chunk
+                for text in chunk:
+                    words = self._preprocess_text(text.strip())
+                    word_counts.update(words)
+
+                # Clear chunk for next batch
+                chunk = []
+
+        # Process any remaining lines
+        if chunk:
+            for text in chunk:
+                words = self._preprocess_text(text.strip())
+                word_counts.update(words)
+
+    # Filter by minimum count
+    self.vocab = [word for word, count in word_counts.items()
+                  if count >= self.min_count]
+
+    # Create word-to-index mappings
+    for i, word in enumerate(self.vocab):
+        self.word_to_idx[word] = i
+        self.idx_to_word[i] = word
+
+    print(f"Vocabulary size: {len(self.vocab)}")
+
+
+def test_word_similarity(model):
+    """Test word similarities with expanded test cases"""
+    test_word_pairs = [
+        ('king', ['queen', 'prince', 'royal', 'ruler', 'monarch', 'throne']),
+        ('man', ['woman', 'boy', 'person', 'gentleman', 'male', 'father']),
+        ('france', ['paris', 'europe', 'italy', 'spain', 'germany', 'french']),
+        ('computer', ['software', 'hardware', 'keyboard', 'programmer', 'digital', 'technology']),
+        ('good', ['great', 'best', 'better', 'excellent', 'fine', 'quality']),
+        ('einstein', ['physicist', 'scientist', 'relativity', 'theory', 'genius', 'newton']),
+        ('apple', ['iphone', 'computer', 'fruit', 'macintosh', 'microsoft', 'steve']),
+        ('car', ['vehicle', 'driver', 'road', 'automobile', 'truck', 'engine']),
+        ('dog', ['cat', 'pet', 'animal', 'canine', 'puppy', 'wolf']),
+        ('python', ['programming', 'language', 'code', 'software', 'java', 'script'])
+    ]
+
+    print("\nTesting word similarities:")
+    found_words = 0
+    total_expected = 0
+
+    for word, expected_similar in test_word_pairs:
+        if word in model.word_to_idx:
+            similar = model.get_most_similar(word, n=15)
+            print(f"\nWords similar to '{word}':")
+            for similar_word, similarity in similar:
+                print(f"  {similar_word}: {similarity:.4f}")
+
+            # Check if any expected words are in the top results
+            found_expected = [sw for sw, _ in similar if sw in expected_similar]
+            total_expected += len(expected_similar)
+            found_words += len(found_expected)
+
+            if found_expected:
+                print(f"  Found expected similar words: {found_expected}")
+            else:
+                print(f"  No expected similar words found in top results")
+        else:
+            print(f"\nWord '{word}' not in vocabulary")
+
+    print(f"\nOverall performance: found {found_words}/{total_expected} expected words "
+          f"({found_words / total_expected * 100:.1f}%)")
+
+    # Test some word analogies
+    test_analogies(model)
+
+
+def test_analogies(model):
+    """Test word analogies: a is to b as c is to d"""
+    analogies = [
+        ('king', 'queen', 'man', 'woman'),
+        ('paris', 'france', 'rome', 'italy'),
+        ('good', 'better', 'bad', 'worse'),
+        ('small', 'smaller', 'big', 'bigger'),
+        ('germany', 'berlin', 'france', 'paris'),
+        ('microsoft', 'windows', 'apple', 'macos'),
+        ('einstein', 'physics', 'darwin', 'biology'),
+        ('man', 'father', 'woman', 'mother')
+    ]
+
+    print("\nTesting word analogies:")
+    correct = 0
+    tested = 0
+
+    for a, b, c, expected_d in analogies:
+        # Skip if any word is not in vocabulary
+        if not all(w in model.word_to_idx for w in [a, b, c, expected_d]):
+            print(f"  Skipping {a}:{b} :: {c}:{expected_d} - Not all words in vocabulary")
+            continue
+
+        # Get vectors
+        a_vec = model.get_vector(a)
+        b_vec = model.get_vector(b)
+        c_vec = model.get_vector(c)
+
+        # b - a + c should be close to d
+        result_vec = b_vec - a_vec + c_vec
+
+        # Normalize result vector
+        result_vec = result_vec / np.linalg.norm(result_vec)
+
+        # Get most similar words excluding input words
+        embeddings = model.model.get_word_embeddings()
+        similarities = np.dot(embeddings, result_vec)
+
+        # Exclude input words
+        for w in [a, b, c]:
+            similarities[model.word_to_idx[w]] = -np.inf
+
+        # Get top 5 most similar words
+        top_indices = np.argsort(-similarities)[:5]
+        top_words = [(model.idx_to_word[idx], similarities[idx]) for idx in top_indices]
+
+        print(f"  {a} : {b} :: {c} : ? (Expected: {expected_d})")
+        print(f"    Top results: {', '.join([f'{w} ({s:.4f})' for w, s in top_words])}")
+
+        if model.idx_to_word[top_indices[0]] == expected_d:
+            correct += 1
+            print(f"    ✓ Correct")
+        else:
+            print(f"    ✗ Incorrect")
+
+        tested += 1
+
+    if tested > 0:
+        print(f"\nAnalogy accuracy: {correct}/{tested} = {correct / tested * 100:.2f}%")
+    else:
+        print("\nNo analogies could be tested due to vocabulary limitations")
+
+def train_on_enwiki(vector_size=300, window_size=5, min_count=50,
+                    learning_rate=0.001, epochs=5, batch_size=4096, use_cuda=False):
+    """Train Word2Vec on the English Wikipedia articles dump"""
+    data_dir = "data"
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Get processed Wikipedia file
+    wiki_file = download_and_process_enwiki(data_dir)
+
+    # Set up model checkpoint paths
+    checkpoint_file = os.path.join(data_dir, "word2vec_enwiki_checkpoint.pt")
+    model_file = os.path.join(data_dir, "word2vec_enwiki.txt")
+
+    # Create Word2Vec model with optimized parameters for Wikipedia
+    model = Word2Vec(
+        vector_size=vector_size,
+        window_size=window_size,
+        min_count=min_count,  # Higher min_count to reduce vocabulary size
+        negative_samples=15,
+        learning_rate=learning_rate,
+        epochs=epochs,
+        batch_size=batch_size
+    )
+
+    # Check for checkpoint to resume training
+    if os.path.exists(checkpoint_file):
+        print(f"Found checkpoint at {checkpoint_file}, attempting to resume...")
+        try:
+            checkpoint = torch.load(checkpoint_file)
+            model.word_to_idx = checkpoint['word_to_idx']
+            model.idx_to_word = checkpoint['idx_to_word']
+            model.vocab = checkpoint['vocab']
+            model.vector_size = checkpoint['vector_size']
+            model.loss_history = checkpoint.get('loss_history', [])
+            model.current_epoch = checkpoint.get('epoch', 0)
+
+            # Initialize model and load weights
+            model.model = SkipGramNegativeSampling(len(model.vocab), model.vector_size)
+            model.model.load_state_dict(checkpoint['model_state_dict'])
+
+            print(f"Successfully resumed training from epoch {model.current_epoch}")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}")
+            print("Starting training from scratch")
+            model.current_epoch = 0
+    else:
+        print("No checkpoint found, starting training from scratch")
+        model.current_epoch = 0
+
+    # Set device
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Build vocabulary if not loaded from checkpoint
+    if not model.vocab:
+        model.build_vocabulary_chunked(wiki_file)
+
+    # Create dataset and dataloader
+    dataset = Word2VecDataset(wiki_file, model.vocab, model.word_to_idx, model.window_size)
+    neg_dataset = NegativeSamplingDataset(dataset, len(model.vocab), model.negative_samples)
+
+    # Create and train model
+    if not hasattr(model, 'model') or model.model is None:
+        model.model = SkipGramNegativeSampling(len(model.vocab), model.vector_size).to(device)
+    else:
+        model.model = model.model.to(device)
+
+    # Use Adam optimizer with improved parameters
+    optimizer = optim.Adam(model.model.parameters(), lr=model.learning_rate)
+
+    # Learning rate scheduler with patience
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=1, verbose=True
+    )
+
+    print("Starting training...")
+    for epoch in range(model.current_epoch, model.current_epoch + model.epochs):
+        total_loss = 0
+        batch_count = 0
+
+        # Reset dataset iterator
+        dataloader = iter(neg_dataset)
+
+        # Progress tracking
+        progress_bar = tqdm(total=len(neg_dataset), desc=f"Epoch {epoch + 1}/{model.current_epoch + model.epochs}")
+
+        # Batch processing
+        target_batch = []
+        context_batch = []
+        neg_batch = []
+
+        for target_idx, context_idx, neg_indices in dataloader:
+            target_batch.append(target_idx)
+            context_batch.append(context_idx)
+            neg_batch.append(neg_indices)
+
+            # Process in batches
+            if len(target_batch) >= model.batch_size:
+                # Convert to tensors
+                targets = torch.LongTensor(target_batch).to(device)
+                contexts = torch.LongTensor(context_batch).to(device)
+                negatives = torch.LongTensor(neg_batch).to(device)
+
+                # Forward and backward pass
+                optimizer.zero_grad()
+                loss = model.model(targets, contexts, negatives)
+                loss.backward()
+
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.model.parameters(), 5.0)
+
+                optimizer.step()
+
+                total_loss += loss.item()
+                batch_count += 1
+
+                # Update progress
+                progress_bar.update(len(target_batch))
+                progress_bar.set_postfix({"Loss": f"{total_loss / batch_count:.4f}"})
+
+                # Clear batches
+                target_batch = []
+                context_batch = []
+                neg_batch = []
+
+        # Process any remaining items
+        if target_batch:
+            targets = torch.LongTensor(target_batch).to(device)
+            contexts = torch.LongTensor(context_batch).to(device)
+            negatives = torch.LongTensor(neg_batch).to(device)
+
+            optimizer.zero_grad()
+            loss = model.model(targets, contexts, negatives)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            batch_count += 1
+
+            progress_bar.update(len(target_batch))
+
+        progress_bar.close()
+
+        # Calculate average loss
+        avg_loss = total_loss / batch_count
+        model.loss_history.append(avg_loss)
+
+        # Update learning rate
+        scheduler.step(avg_loss)
+
+        # Update current epoch
+        model.current_epoch = epoch + 1
+
+        print(f"Epoch {epoch + 1} completed, Avg. Loss: {avg_loss:.4f}, "
+              f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+        # Save checkpoint every epoch
+        save_checkpoint = {
+            'epoch': model.current_epoch,
+            'model_state_dict': model.model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss_history': model.loss_history,
+            'vocab': model.vocab,
+            'word_to_idx': model.word_to_idx,
+            'idx_to_word': model.idx_to_word,
+            'vector_size': model.vector_size
+        }
+        torch.save(save_checkpoint, checkpoint_file)
+
+        # Additionally save embeddings in text format periodically
+        if (epoch + 1) % 2 == 0 or (epoch + 1) == model.epochs:
+            model.save(f"{model_file}.epoch{epoch + 1}")
+
+    # Save final model
+    model.save(model_file)
+
+    # Test the model with known word pairs
+    test_word_similarity(model)
+
+    return model
+
 
 # ----------------------
-# 3. Improved Hacker News Predictor
+# 4. Improved Hacker News Predictor
 # ----------------------
 
 class HackerNewsPredictor(nn.Module):
@@ -726,81 +1181,86 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
 
 
 # ----------------------
-# 4. Sample Usage
+# 5. Sample Usage
 # ----------------------
 
 if __name__ == "__main__":
-    # Train Word2Vec model with improved parameters
-    model = train_word2vec_on_text8(use_cuda=True, use_tiny=True, vector_size=100)
-
-    # Sample Hacker News dataset (title, upvotes)
-    sample_hn_data = [
-        ("Show HN: I built a neural network that generates music", 324),
-        ("Ask HN: What books changed the way you think about programming?", 427),
-        ("Why I switched from Python to Go for backend development", 215),
-        ("The future of WebAssembly and browser technologies", 189),
-        ("How we optimized our PostgreSQL database for 100x performance", 302),
-        ("Ask HN: How do you stay productive working from home?", 512),
-        ("Show HN: An open source alternative to Google Analytics", 387),
-        ("Understanding blockchain technology in 10 minutes", 127),
-        ("My journey from bootcamp to senior developer in 3 years", 203),
-        ("Why functional programming matters for modern applications", 174),
-        ("Ask HN: Best resources to learn machine learning in 2023?", 398),
-        ("Show HN: A lightweight JavaScript framework I built", 251),
-        ("The hidden costs of microservices architecture", 289),
-        ("How we scaled our startup to 1 million users without VC funding", 475),
-        ("Comparing Rust vs C++ for systems programming", 231),
-        ("Ask HN: What's your development environment setup?", 365),
-        ("Why we moved away from Kubernetes after 2 years", 412),
-        ("Understanding memory management in modern JavaScript", 159),
-        ("Show HN: My weekend project - a minimalist note-taking app", 186),
-        ("How I learned to code by building 12 apps in 12 months", 328)
-    ]
-
-    # Generate additional synthetic data
+    import argparse
     import random
 
-    prefixes = ["Show HN:", "Ask HN:", "Why", "How", "The", "Understanding", "My"]
-    topics = ["JavaScript", "Python", "Rust", "Go", "machine learning", "AI", "database",
-              "programming", "frontend", "backend", "cloud", "API", "algorithm", "startup"]
-    suffixes = ["for beginners", "in production", "tutorial", "guide", "explained", "in 10 minutes",
-                "best practices", "optimization tips", "case study", "industry trends"]
+    parser = argparse.ArgumentParser(description='Train Word2Vec on different datasets')
+    parser.add_argument('--dataset', choices=['text8', 'enwiki'], default='enwiki',
+                        help='Dataset to train on (default: enwiki)')
+    parser.add_argument('--tiny', action='store_true', help='Use tiny version of dataset for testing')
+    parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
+    parser.add_argument('--dims', type=int, default=300, help='Embedding dimensions (default: 300)')
+    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs (default: 5)')
+    parser.add_argument('--batch-size', type=int, default=4096, help='Batch size (default: 4096)')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate (default: 0.001)')
+    parser.add_argument('--hn', action='store_true', help='Train Hacker News predictor after Word2Vec')
 
-    for _ in range(80):  # Add 80 more random entries
-        prefix = random.choice(prefixes)
-        topic = random.choice(topics)
-        suffix = random.choice(suffixes) if random.random() > 0.5 else ""
+    args = parser.parse_args()
 
-        title = f"{prefix} {topic} {suffix}".strip()
-        upvotes = int(random.normalvariate(250, 100))  # Mean 250, std dev 100
-        upvotes = max(5, upvotes)  # Ensure positive upvotes with minimum 5
+    if args.dataset == 'enwiki':
+        model = train_on_enwiki(
+            vector_size=args.dims,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr,
+            use_cuda=args.cuda
+        )
+    else:
+        model = train_on_enwiki(
+            use_cuda=args.cuda,
+            use_tiny=args.tiny,
+            vector_size=args.dims
+        )
 
-        sample_hn_data.append((title, upvotes))
+    if args.hn:
+        # Create Hacker News dataset for prediction training
+        hn_data = [
+            ("Show HN: I built a neural network that generates music", 324),
+            ("Ask HN: What books changed the way you think about programming?", 427),
+            ("Why I switched from Python to Go for backend development", 215),
+            ("The future of WebAssembly and browser technologies", 189),
+            ("How we optimized our PostgreSQL database for 100x performance", 302),
+            ("Ask HN: How do you stay productive working from home?", 512),
+            ("Show HN: An open source alternative to Google Analytics", 387),
+            ("Understanding blockchain technology in 10 minutes", 127),
+            ("My journey from bootcamp to senior developer in 3 years", 203),
+            ("Why functional programming matters for modern applications", 174),
+            ("Ask HN: Best resources to learn machine learning in 2023?", 398),
+            ("Show HN: A lightweight JavaScript framework I built", 251),
+            ("The hidden costs of microservices architecture", 289),
+            ("How we scaled our startup to 1 million users without VC funding", 475),
+            ("Comparing Rust vs C++ for systems programming", 231),
+            ("Ask HN: What's your development environment setup?", 365),
+            ("Why we moved away from Kubernetes after 2 years", 412),
+            ("Understanding memory management in modern JavaScript", 159),
+            ("Show HN: My weekend project - a minimalist note-taking app", 186),
+            ("How I learned to code by building 12 apps in 12 months", 328)
+        ]
 
-    print(f"Generated dataset with {len(sample_hn_data)} Hacker News posts")
+        # Generate additional synthetic data
+        prefixes = ["Show HN:", "Ask HN:", "Why", "How", "The", "Understanding", "My"]
+        topics = ["JavaScript", "Python", "Rust", "Go", "machine learning", "AI", "database",
+                  "programming", "frontend", "backend", "cloud", "API", "algorithm", "startup"]
+        suffixes = ["for beginners", "in production", "tutorial", "guide", "explained",
+                    "in 10 minutes", "best practices", "optimization tips", "case study",
+                    "industry trends"]
 
-    # Train the upvote predictor
-    predictor = train_upvote_predictor(model, sample_hn_data, epochs=30)
+        for _ in range(80):  # Add 80 more random entries
+            prefix = random.choice(prefixes)
+            topic = random.choice(topics)
+            suffix = random.choice(suffixes) if random.random() > 0.5 else ""
 
-    # Test on some new titles
-    test_titles = [
-        "Show HN: I built a tool that helps you learn foreign languages",
-        "Ask HN: How do you handle burnout as a developer?",
-        "Why TypeScript is becoming the standard for web development",
-        "Our journey migrating from MongoDB to PostgreSQL",
-        "A beginner's guide to reinforcement learning"
-    ]
+            title = f"{prefix} {topic} {suffix}".strip()
+            upvotes = int(random.normalvariate(250, 100))  # Mean 250, std dev 100
+            upvotes = max(5, upvotes)  # Ensure positive upvotes with minimum 5
 
-    # Create embeddings and predict
-    test_embeddings = [create_document_embedding(title, model) for title in test_titles]
-    test_tensor = torch.FloatTensor(test_embeddings)
+            hn_data.append((title, upvotes))
 
-    predictor.eval()
-    with torch.no_grad():
-        predictions = predictor(test_tensor).numpy()
+        print(f"Generated dataset with {len(hn_data)} Hacker News posts")
 
-    for title, pred in zip(test_titles, predictions):
-        print(f"Title: {title}")
-        print(f"Predicted upvotes: {int(pred[0])}\\n")
-
-    print("Completed Word2Vec training and Hacker News upvote prediction!")
+        # Train the upvote predictor
+        predictor = train_upvote_predictor(model, hn_data, epochs=30)

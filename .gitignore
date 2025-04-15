@@ -3,3 +3,6 @@ data
 text8_word2vec.model
 
 wiki_texts
+
+ssh_key
+ssh_key_fixed

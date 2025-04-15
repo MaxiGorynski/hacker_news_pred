@@ -1189,8 +1189,8 @@ if __name__ == "__main__":
     import random
 
     parser = argparse.ArgumentParser(description='Train Word2Vec on different datasets')
-    parser.add_argument('--dataset', choices=['text8', 'enwiki'], default='enwiki',
-                        help='Dataset to train on (default: enwiki)')
+    parser.add_argument('--dataset', choices=['text8', 'enwiki'], default='text8',
+                        help='Dataset to train on (default: text8)')
     parser.add_argument('--tiny', action='store_true', help='Use tiny version of dataset for testing')
     parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
     parser.add_argument('--dims', type=int, default=300, help='Embedding dimensions (default: 300)')
@@ -1201,6 +1201,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    print(f"Training on dataset: {args.dataset}")
+    print(f"Using CUDA: {args.cuda}")
+    print(f"Dimensions: {args.dims}")
+    print(f"Epochs: {args.epochs}")
+
     if args.dataset == 'enwiki':
         model = train_on_enwiki(
             vector_size=args.dims,
@@ -1210,7 +1215,7 @@ if __name__ == "__main__":
             use_cuda=args.cuda
         )
     else:
-        model = train_on_enwiki(
+        model = train_word2vec_on_text8(
             use_cuda=args.cuda,
             use_tiny=args.tiny,
             vector_size=args.dims

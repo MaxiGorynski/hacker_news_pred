@@ -11,6 +11,8 @@ import random
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+
 
 
 # ----------------------
@@ -100,7 +102,7 @@ class NegativeSamplingDataset(Dataset):
                 words = [word for word in words if word in self.word2vec_dataset.word_to_idx]
 
                 # Limit sample size to manage memory
-                if len(word_counts) > 100_000:
+                if len(word_counts) > 500_000:
                     break
 
                 word_counts.update(words)
@@ -712,14 +714,12 @@ def create_tiny_text8(text8_file, output_file, max_words=500000):
 # ----------------------
 
 class HackerNewsPredictor(nn.Module):
-    """Improved neural network for predicting Hacker News upvotes"""
-
     def __init__(self, embedding_dim=300, hidden_dim=512):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Linear(embedding_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.PReLU(),  # Parametric ReLU for more flexibility
+            nn.PReLU(),
             nn.Dropout(0.5),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.BatchNorm1d(hidden_dim // 2),
@@ -732,26 +732,18 @@ class HackerNewsPredictor(nn.Module):
             nn.ReLU()  # Ensure positive predictions
         )
 
-        # Advanced weight initialization
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
-
     def forward(self, x):
         return self.layers(x)
 
 
 def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_rate=0.001):
     """Train a model to predict Hacker News upvotes with improved parameters"""
-    # Create document embeddings and prepare data
+    # Prepare document embeddings and target values
     X = []
     y = []
 
     for title, upvotes in hn_data:
+        # Create document embedding
         doc_vector = create_document_embedding(title, model)
         X.append(doc_vector)
         y.append(upvotes)
@@ -759,14 +751,12 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
     X = np.array(X)
     y = np.array(y)
 
-    # Normalize target values
-    mean_upvotes = np.mean(y)
-    std_upvotes = np.std(y)
-    print(f"Upvotes statistics: Mean={mean_upvotes:.1f}, Std={std_upvotes:.1f}")
+    # More advanced normalization
+    y_log = np.log1p(y)  # Log transformation to handle skewed distribution
+    y_normalized = (y_log - np.mean(y_log)) / np.std(y_log)
 
-    # Split into train/test sets
-    from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(X, y_normalized, test_size=test_size, random_state=42)
 
     # Convert to PyTorch tensors
     X_train = torch.FloatTensor(X_train)
@@ -774,112 +764,109 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
     X_test = torch.FloatTensor(X_test)
     y_test = torch.FloatTensor(y_test).unsqueeze(1)
 
-    # Create and train model
+    # Create predictor with dynamic input size
     predictor = HackerNewsPredictor(
-        embedding_dim=X_train.shape[1],  # Dynamic input size
-        hidden_dim=512
+        embedding_dim=X_train.shape[1],
+        hidden_dim=min(512, X_train.shape[1] * 2)
     )
 
-    # Advanced optimizer and scheduler
+    # Advanced optimizer
     optimizer = optim.AdamW(
         predictor.parameters(),
-        lr=0.001,
-        weight_decay=0.01,  # L2 regularization
-        amsgrad=True  # Improved Adam variant
+        lr=learning_rate,
+        weight_decay=0.01,
+        amsgrad=True
     )
 
-    # Cosine annealing with restarts
+    # Cosine annealing with warm restarts
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=10,  # Initial restart period
-        T_mult=2,  # Multiplicative factor for restart periods
-        eta_min=1e-5  # Minimum learning rate
+        T_0=10,
+        T_mult=2,
+        eta_min=1e-5
     )
 
-    # Use huber loss for more robust regression
-    criterion = nn.SmoothL1Loss()  # Huber loss
+    # Huber loss for robust regression
+    criterion = nn.SmoothL1Loss()
 
-    # Training loop
+    # Training loop with early stopping
     best_rmse = float('inf')
     patience = 10
     patience_counter = 0
-    train_losses = []
-    test_losses = []
+    train_rmses = []
+    test_rmses = []
 
     for epoch in range(epochs):
-        # Forward pass
         predictor.train()
         optimizer.zero_grad()
 
-        # Use model's forward method to get predictions
+        # Forward pass and loss computation
         train_outputs = predictor(X_train)
         loss = criterion(train_outputs, y_train)
-
-        # Backward pass and optimize
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
-        # Evaluate on test set
+        # Evaluation
         predictor.eval()
         with torch.no_grad():
+            # Compute predictions and denormalize
+            train_preds = train_outputs.numpy() * np.std(y_log) + np.mean(y_log)
             test_outputs = predictor(X_test)
-            test_loss = criterion(test_outputs, y_test)
+            test_preds = test_outputs.numpy() * np.std(y_log) + np.mean(y_log)
 
-            # Calculate RMSE
-            train_rmse = torch.sqrt(loss).item()
-            test_rmse = torch.sqrt(test_loss).item()
+            # Compute RMSE
+            train_rmse = np.sqrt(np.mean((np.expm1(train_preds) - np.expm1(y_train.numpy())) ** 2))
+            test_rmse = np.sqrt(np.mean((np.expm1(test_preds) - np.expm1(y_test.numpy())) ** 2))
 
-            train_losses.append(train_rmse)
-            test_losses.append(test_rmse)
+            train_rmses.append(train_rmse)
+            test_rmses.append(test_rmse)
 
-        print(f"Epoch {epoch + 1}/{epochs}, Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
+            print(f"Epoch {epoch + 1}/{epochs}, Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
 
-        # Update learning rate
-        scheduler.step(test_rmse)
-
-        # Early stopping
-        if test_rmse < best_rmse:
-            best_rmse = test_rmse
-            # Save best model
-            torch.save(predictor.state_dict(), "data/best_hn_predictor.pth")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
-
-    # Load best model
-    predictor.load_state_dict(torch.load("data/best_hn_predictor.pth"))
+            # Early stopping
+            if test_rmse < best_rmse:
+                best_rmse = test_rmse
+                torch.save(predictor.state_dict(), "data/best_hn_predictor.pth")
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print("Early stopping")
+                    break
 
     # Plot training curves
+    import matplotlib.pyplot as plt
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train RMSE')
-    plt.plot(test_losses, label='Test RMSE')
+    plt.plot(train_rmses, label='Train RMSE')
+    plt.plot(test_rmses, label='Test RMSE')
+    plt.title('Training Progress')
     plt.xlabel('Epoch')
     plt.ylabel('RMSE')
-    plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
     plt.savefig('data/upvote_predictor_training.png')
     plt.close()
 
-    # Final evaluation
+    # Final predictions on test set
+    predictor.load_state_dict(torch.load("data/best_hn_predictor.pth"))
     predictor.eval()
+
     with torch.no_grad():
-        train_preds = predictor(X_train).numpy()
-        test_preds = predictor(X_test).numpy()
+        final_test_outputs = predictor(X_test)
+        final_test_preds = final_test_outputs.numpy() * np.std(y_log) + np.mean(y_log)
+        final_test_preds = np.expm1(final_test_preds)
 
-        train_rmse = np.sqrt(np.mean((train_preds - y_train.numpy()) ** 2))
-        test_rmse = np.sqrt(np.mean((test_preds - y_test.numpy()) ** 2))
+        final_train_outputs = predictor(X_train)
+        final_train_preds = final_train_outputs.numpy() * np.std(y_log) + np.mean(y_log)
+        final_train_preds = np.expm1(final_train_preds)
 
-        print(f"\nFinal evaluation:")
+        train_rmse = np.sqrt(np.mean((final_train_preds - np.expm1(y_train.numpy())) ** 2))
+        test_rmse = np.sqrt(np.mean((final_test_preds - np.expm1(y_test.numpy())) ** 2))
+
+        print("\nFinal evaluation:")
         print(f"Train RMSE: {train_rmse:.2f}")
         print(f"Test RMSE: {test_rmse:.2f}")
-
-        # Check if predictions are all positive
-        print(f"Min predicted value: {np.min(test_preds):.2f}")
-        print(f"Max predicted value: {np.max(test_preds):.2f}")
 
     return predictor
 
@@ -936,35 +923,39 @@ def generate_synthetic_hn_data(base_data, additional_samples=1000):
 
 
 def create_document_embedding(title, model, additional_features=True):
-    """Enhanced document embedding with optional additional features"""
+    """Enhanced document embedding with more robust processing"""
     words = model._preprocess_text(title)
-    vectors = [model.get_vector(word) for word in words if model.get_vector(word) is not None]
+
+    # Use word2vec model for initial embedding
+    vectors = []
+    for word in words:
+        vec = model.get_vector(word)
+        if vec is not None:
+            vectors.append(vec)
 
     if vectors:
-        # Ensure word weights match the vectors
-        valid_words = [word for word in words if model.get_vector(word) is not None]
+        # Use more advanced averaging technique
+        doc_vector = np.mean(vectors, axis=0)
 
-        if len(vectors) > 0:
-            # Normalize title length weighting
-            word_weights = np.array([len(word) / len(title) for word in valid_words])
+        # Optional: apply weighted averaging based on term frequency
+        term_freq = Counter(words)
+        weighted_vectors = []
+        for word, vec in zip(words, vectors):
+            weighted_vectors.append(vec * (1 / np.log(term_freq[word] + 1)))
 
-            # Weighted averaging
-            doc_vector = np.average(vectors, axis=0, weights=word_weights)
-        else:
-            # Fallback to simple averaging if no valid word weights
-            doc_vector = np.mean(vectors, axis=0)
+        doc_vector = np.mean(weighted_vectors, axis=0)
     else:
-        # No valid word vectors found
+        # Fallback to zero vector
         doc_vector = np.zeros(model.vector_size)
 
-    # Add additional engineered features
+    # Add additional features
     if additional_features:
-        features = []
-        features.append(len(words))  # Title length
-        features.append(sum(1 for word in words if word.isupper()))  # Uppercase word count
-        features.append(len(set(words)))  # Unique word count
-
-        # Concatenate additional features
+        features = [
+            len(words),  # Title length
+            sum(1 for word in words if word.isupper()),  # Uppercase word count
+            len(set(words)),  # Unique word count
+            np.mean([len(word) for word in words])  # Average word length
+        ]
         doc_vector = np.concatenate([doc_vector, features])
 
     return doc_vector

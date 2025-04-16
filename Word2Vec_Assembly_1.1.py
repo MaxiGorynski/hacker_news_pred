@@ -76,33 +76,153 @@ class Word2VecDataset(Dataset):
 
 
 class NegativeSamplingDataset(Dataset):
-    def __init__(self, word2vec_dataset, vocab_size, negative_samples=15):  # Increased negative samples
+    def __init__(self, word2vec_dataset, vocab_size, negative_samples=20, max_batch_mem=1_000_000_000):  # 1GB default
         self.word2vec_dataset = word2vec_dataset
         self.vocab_size = vocab_size
         self.negative_samples = negative_samples
+        self.max_batch_mem = max_batch_mem
 
-        # Create negative sampling table
+        # Use more memory-efficient negative sampling
         self.negative_table = self._create_negative_table()
         self.table_size = len(self.negative_table)
 
-
-        # Precompute training pairs with negative samples
+        # Batch-based training pair generation to manage memory
         self.training_pairs = []
-        for target_idx, context_idx in word2vec_dataset:
+        self._generate_training_pairs()
+
+    def _create_negative_table(self, table_size=10_000_000):
+        """Create memory-efficient negative sampling table"""
+        word_counts = Counter()
+        # Sample words to reduce memory usage
+        with open(self.word2vec_dataset.corpus_file, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, desc="Building negative sampling table"):
+                words = self.word2vec_dataset._preprocess_text(line.strip())
+                words = [word for word in words if word in self.word2vec_dataset.word_to_idx]
+
+                # Limit sample size to manage memory
+                if len(word_counts) > 100_000:
+                    break
+
+                word_counts.update(words)
+
+        # Convert counts to probabilities with power law
+        word_freqs = np.zeros(self.vocab_size)
+        for word, count in word_counts.items():
+            if word in self.word2vec_dataset.word_to_idx:
+                idx = self.word2vec_dataset.word_to_idx[word]
+                word_freqs[idx] = count
+
+        # Normalize and apply power law
+        word_freqs = np.power(word_freqs, 0.75)  # Adjusted power law
+        word_freqs /= np.sum(word_freqs)
+
+        # More memory-efficient table creation
+        negative_table = []
+        for idx, freq in enumerate(word_freqs):
+            # Dynamically adjust table size based on frequency
+            table_entry_count = max(1, int(freq * table_size))
+            negative_table.extend([idx] * table_entry_count)
+
+        # Truncate or pad to exact table size
+        negative_table = negative_table[:table_size] if len(negative_table) > table_size else \
+            negative_table + [np.random.randint(0, self.vocab_size)] * (table_size - len(negative_table))
+
+        return np.array(negative_table)
+
+    def _generate_training_pairs(self):
+        """Generate training pairs in batches to manage memory"""
+        print("Generating training pairs...")
+        current_batch_size = 0
+        current_batch = []
+
+        for target_idx, context_idx in tqdm(self.word2vec_dataset, desc="Creating negative samples"):
             # Pre-generate negative samples
             neg_indices = np.random.choice(
                 self.negative_table,
                 size=self.negative_samples
             )
 
-            # Make sure target and context are not in negative samples
+            # Ensure no duplicates or overlaps
             for i, neg_idx in enumerate(neg_indices):
                 if neg_idx == target_idx or neg_idx == context_idx:
                     neg_indices[i] = (neg_idx + 1) % self.vocab_size
 
-            self.training_pairs.append((target_idx, context_idx, neg_indices))
+            # Track memory usage
+            pair_mem_estimate = (3 * self.negative_samples + 2) * 4  # Rough estimate of memory per pair
+            current_batch_size += pair_mem_estimate
+
+            current_batch.append((target_idx, context_idx, neg_indices))
+
+            # Flush batch if memory limit approached
+            if current_batch_size > self.max_batch_mem:
+                self.training_pairs.extend(current_batch)
+                current_batch = []
+                current_batch_size = 0
+
+                # Optional: break if memory management becomes critical
+                if len(self.training_pairs) > 10_000_000:
+                    break
+
+        # Add any remaining pairs
+        if current_batch:
+            self.training_pairs.extend(current_batch)
 
         print(f"Total training pairs with negative samples: {len(self.training_pairs)}")
+
+    def __len__(self):
+        return len(self.training_pairs)
+
+    def __getitem__(self, idx):
+        """
+        Returns a tuple of (target_idx, context_idx, negative_sample_indices)
+        """
+        return self.training_pairs[idx]
+
+    def _create_negative_table(self, table_size=100000000):
+        """Create table for negative sampling"""
+        # Count frequency of each word in vocabulary
+        word_counts = Counter()
+        with open(self.word2vec_dataset.corpus_file, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, desc="Building negative sampling table"):
+                words = self.word2vec_dataset._preprocess_text(line.strip())
+                words = [word for word in words if word in self.word2vec_dataset.word_to_idx]
+                word_counts.update(words)
+
+        # Convert counts to probabilities with power of 0.85
+        word_freqs = np.zeros(self.vocab_size)
+        for word, count in word_counts.items():
+            if word in self.word2vec_dataset.word_to_idx:
+                idx = self.word2vec_dataset.word_to_idx[word]
+                word_freqs[idx] = count
+
+        # Apply power distribution with stronger exponent for better contrast
+        word_freqs = np.power(word_freqs, 0.85)
+        word_freqs = word_freqs / np.sum(word_freqs)
+
+        # Create table where frequency determines how many times a word is added
+        negative_table = []
+        for idx, freq in enumerate(word_freqs):
+            negative_table.extend([idx] * int(freq * table_size))
+
+        # Make sure table is exactly table_size
+        if len(negative_table) > table_size:
+            negative_table = negative_table[:table_size]
+        else:
+            # Pad with random indices if necessary
+            padding = table_size - len(negative_table)
+            negative_table.extend(np.random.randint(0, self.vocab_size, padding).tolist())
+
+        return np.array(negative_table)
+
+    def __len__(self):
+        return len(self.training_pairs)
+
+    def __getitem__(self, idx):
+        """
+        Implement __getitem__ method for DataLoader compatibility
+        Returns a tuple of (target_idx, context_idx, negative_sample_indices)
+        """
+        return self.training_pairs[idx]
 
     def _create_negative_table(self, table_size=100000000):
         """Create table for negative sampling"""
@@ -221,10 +341,21 @@ class Word2Vec:
         return word_probs
 
     def _preprocess_text(self, text):
-        """Basic text preprocessing"""
+        """Basic text preprocessing without lemmatization"""
+        # Convert to lowercase
         text = text.lower()
+
+        # Remove punctuation and numbers
         text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
-        return text.split()
+        text = re.sub(r'\d+', '', text)  # Remove numbers
+
+        # Split into words
+        words = text.split()
+
+        # Optional: Remove very short words
+        words = [word for word in words if len(word) > 1]
+
+        return words
 
     def build_vocabulary(self, corpus_file):
         """Build vocabulary from corpus file"""
@@ -588,42 +719,30 @@ class HackerNewsPredictor(nn.Module):
         self.layers = nn.Sequential(
             nn.Linear(embedding_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.4),  # Increased dropout
+            nn.PReLU(),  # Parametric ReLU for more flexibility
+            nn.Dropout(0.5),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.PReLU(),
+            nn.Dropout(0.5),
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.BatchNorm1d(hidden_dim // 4),
-            nn.ReLU(),
+            nn.PReLU(),
             nn.Linear(hidden_dim // 4, 1),
-            nn.ReLU()
+            nn.ReLU()  # Ensure positive predictions
         )
 
-        # Proper weight initialization
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+        # Advanced weight initialization
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, x):
         return self.layers(x)
-
-
-def create_document_embedding(title, model):
-    """Convert a Hacker News title to a document embedding by averaging word vectors"""
-    words = model._preprocess_text(title)
-    vectors = [model.get_vector(word) for word in words if word in model.word_to_idx]
-
-    if vectors:
-        # Average word vectors
-        doc_vector = np.mean(vectors, axis=0)
-    else:
-        doc_vector = np.zeros(model.vector_size)
-
-    return doc_vector
 
 
 def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_rate=0.001):
@@ -656,14 +775,31 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
     y_test = torch.FloatTensor(y_test).unsqueeze(1)
 
     # Create and train model
-    predictor = HackerNewsPredictor(embedding_dim=model.vector_size)
-    optimizer = optim.Adam(predictor.parameters(), lr=learning_rate, weight_decay=1e-5)  # Added weight decay
-    criterion = nn.MSELoss()
+    predictor = HackerNewsPredictor(
+        embedding_dim=X_train.shape[1],  # Dynamic input size
+        hidden_dim=512
+    )
 
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, verbose=True)
+    # Advanced optimizer and scheduler
+    optimizer = optim.AdamW(
+        predictor.parameters(),
+        lr=0.001,
+        weight_decay=0.01,  # L2 regularization
+        amsgrad=True  # Improved Adam variant
+    )
 
-    # Training loop with early stopping
+    # Cosine annealing with restarts
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=10,  # Initial restart period
+        T_mult=2,  # Multiplicative factor for restart periods
+        eta_min=1e-5  # Minimum learning rate
+    )
+
+    # Use huber loss for more robust regression
+    criterion = nn.SmoothL1Loss()  # Huber loss
+
+    # Training loop
     best_rmse = float('inf')
     patience = 10
     patience_counter = 0
@@ -674,8 +810,10 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
         # Forward pass
         predictor.train()
         optimizer.zero_grad()
-        outputs = predictor(X_train)
-        loss = criterion(outputs, y_train)
+
+        # Use model's forward method to get predictions
+        train_outputs = predictor(X_train)
+        loss = criterion(train_outputs, y_train)
 
         # Backward pass and optimize
         loss.backward()
@@ -746,13 +884,98 @@ def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50, learning_ra
     return predictor
 
 
+def generate_synthetic_hn_data(base_data, additional_samples=1000):
+    synthetic_data = []
+
+    # More sophisticated generation
+    contexts = [
+        "Web Development", "Machine Learning", "Startup Tech",
+        "Open Source", "Cloud Computing", "AI/ML", "Cybersecurity"
+    ]
+
+    for _ in range(additional_samples):
+        context = random.choice(contexts)
+        keywords = {
+            "Web Development": ["React", "Vue", "Angular", "Frontend"],
+            "Machine Learning": ["TensorFlow", "PyTorch", "ML", "Deep Learning"],
+            "Startup Tech": ["Funding", "Pitch", "Innovation"],
+            "Open Source": ["GitHub", "Community", "Collaboration"],
+            "Cloud Computing": ["AWS", "Azure", "Kubernetes"],
+            "AI/ML": ["GPT", "Neural Networks", "Machine Learning"],
+            "Cybersecurity": ["Encryption", "Penetration Testing", "Security"]
+        }
+
+        # Generate more realistic title
+        title_template = random.choice([
+            "Show HN: {tech} {context} Project",
+            "Ask HN: {context} Best Practices",
+            "Tell HN: My Journey with {tech}",
+            "How I Built a {tech} Solution for {context}"
+        ])
+
+        tech = random.choice(keywords.get(context, []))
+        title = title_template.format(tech=tech, context=context)
+
+        # More nuanced upvote generation
+        base_upvotes = np.random.lognormal(mean=5, sigma=1) * 50
+        context_boost = {
+            "Web Development": 1.2,
+            "Machine Learning": 1.5,
+            "Startup Tech": 1.3,
+            "Open Source": 1.1,
+            "Cloud Computing": 1.4,
+            "AI/ML": 1.6,
+            "Cybersecurity": 1.2
+        }
+
+        upvotes = int(base_upvotes * context_boost.get(context, 1.0))
+
+        synthetic_data.append((title, upvotes))
+
+    return base_data + synthetic_data
+
+
+def create_document_embedding(title, model, additional_features=True):
+    """Enhanced document embedding with optional additional features"""
+    words = model._preprocess_text(title)
+    vectors = [model.get_vector(word) for word in words if model.get_vector(word) is not None]
+
+    if vectors:
+        # Ensure word weights match the vectors
+        valid_words = [word for word in words if model.get_vector(word) is not None]
+
+        if len(vectors) > 0:
+            # Normalize title length weighting
+            word_weights = np.array([len(word) / len(title) for word in valid_words])
+
+            # Weighted averaging
+            doc_vector = np.average(vectors, axis=0, weights=word_weights)
+        else:
+            # Fallback to simple averaging if no valid word weights
+            doc_vector = np.mean(vectors, axis=0)
+    else:
+        # No valid word vectors found
+        doc_vector = np.zeros(model.vector_size)
+
+    # Add additional engineered features
+    if additional_features:
+        features = []
+        features.append(len(words))  # Title length
+        features.append(sum(1 for word in words if word.isupper()))  # Uppercase word count
+        features.append(len(set(words)))  # Unique word count
+
+        # Concatenate additional features
+        doc_vector = np.concatenate([doc_vector, features])
+
+    return doc_vector
+
 # ----------------------
 # 4. Sample Usage
 # ----------------------
 
 if __name__ == "__main__":
     # Train Word2Vec model with improved parameters
-    model = train_word2vec_on_text8(use_cuda=True, use_tiny=True, vector_size=100)
+    model = train_word2vec_on_text8(use_cuda=True, use_tiny=False, vector_size=100)
 
     # Sample Hacker News dataset (title, upvotes)
     sample_hn_data = [

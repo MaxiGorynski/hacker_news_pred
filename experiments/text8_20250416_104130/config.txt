@@ -1,0 +1,9 @@
+vector_size: 200
+epochs: 20
+batch_size: 4096
+learning_rate: 0.001
+window_size: 5
+min_count: 5
+negative_samples: 15
+use_cuda: False
+use_tiny: False

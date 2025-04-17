@@ -14,6 +14,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import scipy
+import itertools
+import os
+import csv
+from datetime import datetime
 
 
 
@@ -617,6 +621,7 @@ def create_tiny_text8(text8_file, output_file, max_words=500000):
 # 3. Improved Hacker News Predictor
 # ----------------------
 
+class EnhancedUpvotePredictor(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
         self.model = nn.Sequential(
@@ -813,14 +818,285 @@ def create_document_embedding(title, model, additional_features=True):
     return np.zeros(model.vector_size + 5)
 
 # ----------------------
-# 4. Sample Usage
+# 4. Self-Improving Adjustments
+# ----------------------
+def comprehensive_word2vec_exploration(max_configurations=50, use_tiny=False):
+    # Create a unique timestamp for this exploration run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = "exploration_logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create detailed logging files
+    config_log_path = os.path.join(log_dir, f"config_log_{timestamp}.csv")
+    performance_log_path = os.path.join(log_dir, f"performance_log_{timestamp}.txt")
+
+    # Open CSV for configuration logging
+    with open(config_log_path, 'w', newline='') as config_csv, \
+            open(performance_log_path, 'w') as perf_log:
+
+        # CSV writer for configurations
+        config_writer = csv.writer(config_csv)
+        config_writer.writerow([
+            "Configuration_ID",
+            "Vector_Size",
+            "Window_Size",
+            "Min_Count",
+            "Negative_Samples",
+            "Learning_Rate",
+            "Epochs",
+            "Batch_Size",
+            "Overall_Performance_Score",
+            "Similarity_Scores",
+            "Coverage_Scores"
+        ])
+
+        # Reduce parameter space for quicker testing
+        param_grid = {
+            'vector_size': [50, 100, 300],
+            'window_size': [3, 5, 8],
+            'min_count': [1, 3, 5],
+            'negative_samples': [10, 15, 25],
+            'learning_rate': [0.001, 0.0015, 0.005],
+            'epochs': [10, 15, 25],
+            'batch_size': [512, 1024, 2048]
+        }
+
+        # Generate all possible configurations
+        import itertools
+        all_configs = list(itertools.product(
+            param_grid['vector_size'],
+            param_grid['window_size'],
+            param_grid['min_count'],
+            param_grid['negative_samples'],
+            param_grid['learning_rate'],
+            param_grid['epochs'],
+            param_grid['batch_size']
+        ))
+
+        # Randomize or limit configurations to prevent excessive runtime
+        import random
+        random.shuffle(all_configs)
+        configs_to_test = all_configs[:max_configurations]
+
+        best_config = None
+        best_performance = float('inf')
+
+        # Iterate through configurations
+        for config_id, (vector_size, window_size, min_count, negative_samples,
+                        learning_rate, epochs, batch_size) in enumerate(configs_to_test, 1):
+
+            print(f"\n--- Testing Configuration {config_id}/{len(configs_to_test)} ---")
+            print(f"Parameters:")
+            print(f"Vector Size: {vector_size}")
+            print(f"Window Size: {window_size}")
+            print(f"Min Count: {min_count}")
+            print(f"Negative Samples: {negative_samples}")
+            print(f"Learning Rate: {learning_rate}")
+            print(f"Epochs: {epochs}")
+            print(f"Batch Size: {batch_size}")
+
+            try:
+                # Create model with current configuration
+                model = Word2Vec(
+                    vector_size=vector_size,
+                    window_size=window_size,
+                    min_count=min_count,
+                    negative_samples=negative_samples,
+                    learning_rate=learning_rate,
+                    epochs=epochs,
+                    batch_size=batch_size
+                )
+
+                # Train on full or tiny corpus
+                trained_model = train_word2vec_on_text8(
+                    use_cuda=True,
+                    use_tiny=use_tiny,
+                    vector_size=vector_size
+                )
+
+                # Evaluate performance
+                performance_metrics = evaluate_word2vec_performance(trained_model)
+
+                # Log configuration and performance
+                config_writer.writerow([
+                    config_id,
+                    vector_size,
+                    window_size,
+                    min_count,
+                    negative_samples,
+                    learning_rate,
+                    epochs,
+                    batch_size,
+                    performance_metrics['overall_score'],
+                    str(performance_metrics['similarity_scores']),
+                    str(performance_metrics['coverage_scores'])
+                ])
+                config_csv.flush()  # Ensure writing to disk
+
+                # Write to performance log
+                perf_log.write(f"\nConfiguration {config_id}:\n")
+                perf_log.write(f"Parameters: {locals()}\n")
+                perf_log.write(f"Performance Metrics: {performance_metrics}\n")
+                perf_log.flush()
+
+                # Update best configuration
+                if performance_metrics['overall_score'] < best_performance:
+                    best_performance = performance_metrics['overall_score']
+                    best_config = {
+                        'vector_size': vector_size,
+                        'window_size': window_size,
+                        'min_count': min_count,
+                        'negative_samples': negative_samples,
+                        'learning_rate': learning_rate,
+                        'epochs': epochs,
+                        'batch_size': batch_size,
+                        'performance': performance_metrics
+                    }
+
+                print(f"Performance Score: {performance_metrics['overall_score']}")
+
+            except Exception as e:
+                print(f"Configuration {config_id} failed: {e}")
+                # Log the failed configuration
+                config_writer.writerow([
+                    config_id,
+                    vector_size,
+                    window_size,
+                    min_count,
+                    negative_samples,
+                    learning_rate,
+                    epochs,
+                    batch_size,
+                    "FAILED",
+                    str(e)
+                ])
+                config_csv.flush()
+
+                perf_log.write(f"\nConfiguration {config_id} FAILED:\n")
+                perf_log.write(f"Parameters: {locals()}\n")
+                perf_log.write(f"Error: {e}\n")
+                perf_log.flush()
+
+        return best_config
+
+
+def evaluate_word2vec_performance(model, max_test_words=20):
+    """
+    Comprehensive performance evaluation with error handling
+    """
+    try:
+        # Word similarity test set
+        similarity_tests = [
+            ('king', ['queen', 'prince', 'ruler']),
+            ('man', ['woman', 'person']),
+            ('france', ['paris', 'europe', 'country']),
+            ('computer', ['software', 'hardware', 'programming'])
+        ]
+
+        # Limit tests to prevent excessive computation
+        similarity_tests = similarity_tests[:max_test_words]
+
+        # Compute metrics
+        similarity_scores = []
+        coverage_scores = []
+
+        for word, expected_similar in similarity_tests:
+            try:
+                # Ensure word exists in vocabulary
+                if word not in model.word_to_idx:
+                    continue
+
+                similar_words = model.get_most_similar(word, n=10)
+
+                # Compute similarity score
+                found_similar = [w for w, _ in similar_words if w in expected_similar]
+                similarity_score = len(found_similar) / len(expected_similar) if expected_similar else 0
+                similarity_scores.append(similarity_score)
+
+                # Vocabulary coverage
+                coverage_scores.append(len(model.vocab) / 71264)  # Relative to text8 vocabulary
+
+            except Exception as word_error:
+                print(f"Error evaluating {word}: {word_error}")
+                similarity_scores.append(0)
+                coverage_scores.append(0)
+
+        # Composite performance score
+        # Lower score is better
+        overall_score = (
+                1 - np.mean(similarity_scores) +  # Semantic similarity
+                np.std(similarity_scores) +  # Consistency
+                (1 - np.mean(coverage_scores))  # Vocabulary coverage
+        )
+
+        return {
+            'similarity_scores': similarity_scores,
+            'coverage_scores': coverage_scores,
+            'overall_score': overall_score
+        }
+
+    except Exception as e:
+        print(f"Comprehensive evaluation failed: {e}")
+        return {
+            'similarity_scores': [],
+            'coverage_scores': [],
+            'overall_score': float('inf')
+        }
+
+
+# ----------------------
+# 5. Sample Usage
 # ----------------------
 
 if __name__ == "__main__":
-    # Train Word2Vec model with improved parameters
-    model = train_word2vec_on_text8(use_cuda=True, use_tiny=False, vector_size=100)
+    # Import necessary libraries
+    import random
+    import torch
+    import numpy as np
 
-    # Sample Hacker News dataset (title, upvotes)
+    # Comprehensive Word2Vec Exploration
+    print("Starting Word2Vec Parameter Exploration...")
+    best_config = comprehensive_word2vec_exploration(
+        max_configurations=50,  # Limit to 50 configurations for reasonable runtime
+        use_tiny=False  # Use full corpus
+    )
+
+    # Print best configuration details
+    print("\nBest Configuration Found:")
+    for key, value in best_config.items():
+        print(f"{key}: {value}")
+
+    # Train Word2Vec model with best parameters
+    model = train_word2vec_on_text8(
+        use_cuda=True,
+        use_tiny=False,
+        vector_size=best_config['vector_size']
+    )
+
+    # Synthetic Data Generation Function
+    def generate_synthetic_hn_data(base_data, additional_samples=80):
+        prefixes = ["Show HN:", "Ask HN:", "Why", "How", "The", "Understanding", "My"]
+        topics = ["JavaScript", "Python", "Rust", "Go", "machine learning", "AI", "database",
+                  "programming", "frontend", "backend", "cloud", "API", "algorithm", "startup"]
+        suffixes = ["for beginners", "in production", "tutorial", "guide", "explained", "in 10 minutes",
+                    "best practices", "optimization tips", "case study", "industry trends"]
+
+        synthetic_data = base_data.copy()
+
+        for _ in range(additional_samples):
+            prefix = random.choice(prefixes)
+            topic = random.choice(topics)
+            suffix = random.choice(suffixes) if random.random() > 0.5 else ""
+
+            title = f"{prefix} {topic} {suffix}".strip()
+            upvotes = int(random.normalvariate(250, 100))  # Mean 250, std dev 100
+            upvotes = max(5, upvotes)  # Ensure positive upvotes with minimum 5
+
+            synthetic_data.append((title, upvotes))
+
+        return synthetic_data
+
+    # Sample Hacker News dataset (base data)
     sample_hn_data = [
         ("Show HN: I built a neural network that generates music", 324),
         ("Ask HN: What books changed the way you think about programming?", 427),
@@ -845,31 +1121,18 @@ if __name__ == "__main__":
     ]
 
     # Generate additional synthetic data
-    import random
+    full_hn_data = generate_synthetic_hn_data(sample_hn_data)
+    print(f"Generated dataset with {len(full_hn_data)} Hacker News posts")
 
-    prefixes = ["Show HN:", "Ask HN:", "Why", "How", "The", "Understanding", "My"]
-    topics = ["JavaScript", "Python", "Rust", "Go", "machine learning", "AI", "database",
-              "programming", "frontend", "backend", "cloud", "API", "algorithm", "startup"]
-    suffixes = ["for beginners", "in production", "tutorial", "guide", "explained", "in 10 minutes",
-                "best practices", "optimization tips", "case study", "industry trends"]
+    # Train the upvote predictor with dynamically adjusted parameters
+    predictor = train_upvote_predictor(
+        model,
+        full_hn_data,
+        epochs=30,  # Can be adjusted based on exploration results
+        learning_rate=best_config.get('learning_rate', 0.001)
+    )
 
-    for _ in range(80):  # Add 80 more random entries
-        prefix = random.choice(prefixes)
-        topic = random.choice(topics)
-        suffix = random.choice(suffixes) if random.random() > 0.5 else ""
-
-        title = f"{prefix} {topic} {suffix}".strip()
-        upvotes = int(random.normalvariate(250, 100))  # Mean 250, std dev 100
-        upvotes = max(5, upvotes)  # Ensure positive upvotes with minimum 5
-
-        sample_hn_data.append((title, upvotes))
-
-    print(f"Generated dataset with {len(sample_hn_data)} Hacker News posts")
-
-    # Train the upvote predictor
-    predictor = train_upvote_predictor(model, sample_hn_data, epochs=30)
-
-    # Test on some new titles
+    # Test titles
     test_titles = [
         "Show HN: I built a tool that helps you learn foreign languages",
         "Ask HN: How do you handle burnout as a developer?",
@@ -886,8 +1149,9 @@ if __name__ == "__main__":
     with torch.no_grad():
         predictions = predictor(test_tensor).numpy()
 
+    # Print predictions
     for title, pred in zip(test_titles, predictions):
         print(f"Title: {title}")
-        print(f"Predicted upvotes: {int(pred[0])}\\n")
+        print(f"Predicted upvotes: {int(pred[0])}\n")
 
     print("Completed Word2Vec training and Hacker News upvote prediction!")

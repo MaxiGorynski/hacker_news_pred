@@ -6,3 +6,4 @@ wiki_texts
 
 ssh_key
 ssh_key_fixed
+templates/plain.html

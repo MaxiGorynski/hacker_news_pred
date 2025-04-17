@@ -30,7 +30,7 @@ class HNFeatureEngineer:
         """Extract base data from PostgreSQL"""
         # Define date range for query
         if start_date is None:
-            start_date = datetime.now() - timedelta(days=10*365)
+            start_date = datetime.now() - timedelta(days=365)
         if end_date is None:
             end_date = datetime.now()
 
@@ -85,11 +85,11 @@ class HNFeatureEngineer:
 
         # Calculate domain trend (last 6 months vs previous 6 months)
         now = df['time_of_post'].max()
+        three_months_ago = now - timedelta(days=90)
         six_months_ago = now - timedelta(days=180)
-        twelve_months_ago = now - timedelta(days=360)
 
-        recent_posts = df[df['time_of_post'] > six_months_ago]
-        older_posts = df[(df['time_of_post'] <= six_months_ago) & (df['time_of_post'] > twelve_months_ago)]
+        recent_posts = df[df['time_of_post'] > three_months_ago]
+        older_posts = df[(df['time_of_post'] <= three_months_ago) & (df['time_of_post'] > six_months_ago)]
 
         recent_domain_stats = recent_posts.groupby('domain')['upvotes'].mean().reset_index()
         recent_domain_stats.columns = ['domain', 'recent_avg_upvotes']
@@ -123,11 +123,11 @@ class HNFeatureEngineer:
 
         # Calculate author trend (last 6 months vs previous 6 months)
         now = df['time_of_post'].max()
+        three_months_ago = now - timedelta(days=90)
         six_months_ago = now - timedelta(days=180)
-        twelve_months_ago = now - timedelta(days=360)
 
-        recent_posts = df[df['time_of_post'] > six_months_ago]
-        previous_posts = df[(df['time_of_post'] <= six_months_ago) & (df['time_of_post'] > twelve_months_ago)]
+        recent_posts = df[df['time_of_post'] > three_months_ago]
+        previous_posts = df[(df['time_of_post'] <= three_months_ago) & (df['time_of_post'] > six_months_ago)]
 
         # Group both
         recent_avg = recent_posts.groupby('author')['upvotes'].mean().reset_index()

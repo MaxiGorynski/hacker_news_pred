@@ -621,109 +621,500 @@ def create_tiny_text8(text8_file, output_file, max_words=500000):
 # ----------------------
 
 # Make sure this replaces any existing EnhancedUpvotePredictor class
-class EnhancedUpvotePredictor(nn.Module):  # Explicitly inherit from nn.Module
+class EnhancedUpvotePredictor(nn.Module):
     def __init__(self, input_dim):
-        super().__init__()  # This calls nn.Module.__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.BatchNorm1d(256),
-            nn.PReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(256, 128),
-            nn.LayerNorm(128),
-            nn.SELU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.PReLU(),
+        super().__init__()
+
+        # Attention mechanism for input features
+        self.attention = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.Tanh(),
             nn.Linear(64, 1),
-            nn.ReLU()  # Ensure non-negative predictions
+            nn.Softmax(dim=1)
+        )
+
+        # Main network with increased width and depth
+        self.main_network = nn.Sequential(
+            # Layer 1
+            nn.Linear(input_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.5),
+
+            # Layer 2
+            nn.Linear(512, 384),
+            nn.BatchNorm1d(384),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.5),
+
+            # Layer 3
+            nn.Linear(384, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.45),
+
+            # Layer 4
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.4),
+
+            # Layer 5
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
+
+            # Output layer
+            nn.Linear(64, 1),
+            nn.ReLU()  # Ensure predictions are non-negative
         )
 
     def forward(self, x):
-        return self.model(x)
+        # Apply attention mechanism
+        batch_size = x.shape[0]
+        attention_weights = self.attention(x.unsqueeze(2).transpose(1, 2))
+        attended_input = torch.bmm(attention_weights.transpose(1, 2), x.unsqueeze(2)).squeeze(2)
+
+        # Residual connection - combine attended features with original
+        enhanced_input = x + attended_input
+
+        # Pass through main network
+        return self.main_network(enhanced_input)
 
 
-def train_upvote_predictor(model, hn_data, test_size=0.2, epochs=50):
-    # Prepare data with enhanced embedding
-    X = []
-    y = []
+def create_enhanced_embedding(title, model, upvotes=None, upvote_mean=None, upvote_median=None, upvote_q75=None):
+    """
+    Create enhanced document embedding with sophisticated feature engineering
 
-    for title, upvotes in hn_data:
-        doc_vector = create_document_embedding(title, model)
-        X.append(doc_vector)
-        y.append(upvotes)
+    Args:
+        title: The title text
+        model: Word2Vec model
+        upvotes: Optional upvote count (for training)
+        upvote_mean, upvote_median, upvote_q75: Statistics for better feature engineering
 
-    X = np.array(X)
-    y = np.array(y)
+    Returns:
+        Enhanced document vector with engineered features
+    """
+    try:
+        # Basic preprocessing
+        words = model._preprocess_text(str(title))
 
-    # Log transformation of target variable
-    y_log = np.log1p(y)
-    y_normalized = (y_log - np.mean(y_log)) / np.std(y_log)
+        if not words:
+            # Empty title case
+            return np.zeros(model.vector_size + 15)  # Adjust size based on feature count
 
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y_normalized, test_size=test_size)
+        # Store word vectors and calculate various statistics
+        vectors = []
+        word_weights = []
+        word_lengths = []
 
-    # Convert to tensors
-    X_train = torch.FloatTensor(X_train)
-    y_train = torch.FloatTensor(y_train).unsqueeze(1)
-    X_test = torch.FloatTensor(X_test)
-    y_test = torch.FloatTensor(y_test).unsqueeze(1)
+        # Count special words
+        hn_markers = ['show', 'ask', 'tell']
+        tech_keywords = ['app', 'code', 'software', 'programming', 'data', 'api',
+                         'python', 'javascript', 'web', 'neural', 'ai', 'ml']
 
-    # Initialize predictor
-    predictor = EnhancedUpvotePredictor(X_train.shape[1])
+        # Get IDF-like weights for words (to emphasize rare/important words)
+        vocab_size = len(model.vocab)
 
-    # Advanced optimizer
-    optimizer = optim.AdamW(
-        predictor.parameters(),
-        lr=0.001,
-        weight_decay=0.01
-    )
+        for word in words:
+            try:
+                vec = model.get_vector(word)
+                if vec is not None:
+                    # Enhanced position weighting (title beginning and end are important)
+                    position = words.index(word)
+                    if position == 0 or position == len(words) - 1:
+                        position_weight = 1.5  # Higher weight for first/last words
+                    else:
+                        position_weight = 1.0 / (abs(position - len(words) / 2) + 1)
 
-    # Huber loss for robust regression
-    criterion = nn.SmoothL1Loss()
+                    # Increase weight for rare words (approximated using index in vocabulary)
+                    if word in model.word_to_idx:
+                        # Assume lower indices are more common words
+                        word_idx = model.word_to_idx[word]
+                        rarity_weight = min(3.0, 0.5 + (word_idx / vocab_size) * 2)
+                    else:
+                        rarity_weight = 1.0
 
-    # Training loop with early stopping
-    best_rmse = float('inf')
-    patience = 10
-    patience_counter = 0
+                    # Combine weights
+                    combined_weight = position_weight * rarity_weight
 
-    for epoch in range(epochs):
-        predictor.train()
-        optimizer.zero_grad()
+                    vectors.append(vec)
+                    word_weights.append(combined_weight)
+                    word_lengths.append(len(word))
+            except Exception:
+                continue
 
-        outputs = predictor(X_train)
-        loss = criterion(outputs, y_train)
+        if not vectors:
+            # No valid vectors found
+            return np.zeros(model.vector_size + 15)  # Adjust size based on feature count
 
-        loss.backward()
-        optimizer.step()
+        # Calculate weighted average embedding
+        doc_vector = np.average(vectors, axis=0, weights=word_weights)
 
-        # Evaluation
-        predictor.eval()
-        with torch.no_grad():
-            train_preds = outputs.numpy()
-            test_outputs = predictor(X_test)
-            test_preds = test_outputs.numpy()
+        # Basic title features
+        title_length = len(words)
+        title_length_squared = title_length ** 2  # Non-linear length effect
+        avg_word_length = np.mean(word_lengths)
+        max_word_length = max(word_lengths)
+        uppercase_count = sum(1 for word in words if word.isupper())
 
-            # Denormalize predictions
-            train_preds_orig = np.expm1(train_preds * np.std(y_log) + np.mean(y_log))
-            test_preds_orig = np.expm1(test_preds * np.std(y_log) + np.mean(y_log))
+        # HN-specific features
+        has_marker = 1 if any(marker in words for marker in hn_markers) else 0
+        marker_position = next((words.index(w) for w in words if w in hn_markers), -1)
+        marker_position_normalized = marker_position / len(words) if marker_position >= 0 else -0.1
 
-            train_rmse = np.sqrt(np.mean((train_preds_orig - np.expm1(y_train.numpy())) ** 2))
-            test_rmse = np.sqrt(np.mean((test_preds_orig - np.expm1(y_test.numpy())) ** 2))
+        # Content type features
+        tech_keyword_count = sum(1 for word in words if word in tech_keywords)
+        tech_keyword_ratio = tech_keyword_count / len(words) if words else 0
 
-            print(f"Epoch {epoch + 1}, Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
+        # Sentiment features (very simple approximation)
+        positive_words = ['best', 'great', 'amazing', 'excellent', 'awesome', 'free', 'new']
+        negative_words = ['bug', 'issue', 'problem', 'error', 'fail', 'broken']
+        positive_count = sum(1 for word in words if word in positive_words)
+        negative_count = sum(1 for word in words if word in negative_words)
+        sentiment_score = (positive_count - negative_count) / len(words) if words else 0
 
-            # Early stopping
-            if test_rmse < best_rmse:
-                best_rmse = test_rmse
-                patience_counter = 0
-            else:
-                patience_counter += 1
+        # Combine basic features
+        basic_features = [
+            title_length,
+            title_length_squared,
+            avg_word_length,
+            max_word_length,
+            uppercase_count,
+            has_marker,
+            marker_position_normalized,
+            tech_keyword_count,
+            tech_keyword_ratio,
+            sentiment_score
+        ]
+
+        # Optional: Add upvote-related features for training
+        if upvotes is not None and upvote_mean is not None:
+            # Log-transform and normalize upvotes
+            log_upvotes = np.log1p(upvotes)
+
+            # Create relative indicators
+            is_above_mean = 1.0 if upvotes > np.exp(upvote_mean) else 0.0
+            is_above_median = 1.0 if upvotes > upvote_median else 0.0
+            is_high_performer = 1.0 if upvotes > upvote_q75 else 0.0
+            percentile_approx = min(1.0, upvotes / (upvote_q75 * 2))
+
+            upvote_features = [
+                log_upvotes,
+                is_above_mean,
+                is_above_median,
+                is_high_performer,
+                percentile_approx
+            ]
+
+            # Return embedding + all features
+            return np.concatenate([doc_vector, basic_features, upvote_features])
+        else:
+            # For prediction, add placeholder zeros for upvote features
+            upvote_features = [0.0, 0.0, 0.0, 0.0, 0.0]
+            return np.concatenate([doc_vector, basic_features, upvote_features])
+
+    except Exception as e:
+        # Fallback for any errors
+        logging.error(f"Error in document embedding: {e}")
+        return np.zeros(model.vector_size + 15)  # Adjust size based on feature count
+
+def train_upvote_predictor(model, df, test_size=0.2, validation=True):
+    """
+        Enhanced training function with better hyperparameters and evaluation
+
+        Args:
+            model: Word2Vec model with embeddings
+            df: DataFrame with titles and upvotes
+            test_size: Fraction of data to use for testing
+            validation: Whether to use validation set (if False, use all for training)
+
+        Returns:
+            Trained predictor model
+        """
+    # Get logger
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Create embeddings
+        X = []
+        y = []
+
+        logger.info("Creating document embeddings with enhanced features")
+        logger.info(f"Processing {len(df)} titles...")
+
+        # Track progress with tqdm
+        from tqdm import tqdm
+
+        # Compute statistics for better scaling/normalization
+        upvotes_array = np.array(df['upvotes'])
+        log_upvotes = np.log1p(upvotes_array)
+        upvote_mean = np.mean(log_upvotes)
+        upvote_std = np.std(log_upvotes)
+        upvote_median = np.median(upvotes_array)
+        upvote_q75 = np.percentile(upvotes_array, 75)
+
+        logger.info(f"Upvote statistics - Mean: {upvote_mean:.4f}, Std: {upvote_std:.4f}")
+        logger.info(f"Median: {upvote_median}, 75th percentile: {upvote_q75}")
+
+        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Creating embeddings"):
+            try:
+                title = row['title']
+                upvotes = row['upvotes']
+
+                # Create enhanced document embedding
+                doc_vector = create_enhanced_embedding(
+                    title,
+                    model,
+                    upvotes=upvotes,
+                    upvote_mean=upvote_mean,
+                    upvote_median=upvote_median,
+                    upvote_q75=upvote_q75
+                )
+
+                X.append(doc_vector)
+                y.append(upvotes)
+
+            except Exception as e:
+                logger.error(f"Error processing row {idx}: {e}")
+                continue
+
+        logger.info(f"Successfully created {len(X)} document embeddings")
+
+        # Convert to numpy arrays
+        X = np.array(X)
+        y = np.array(y)
+
+        logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
+
+        # Apply log transform and normalization to target
+        y_log = np.log1p(y)
+        y_mean = np.mean(y_log)
+        y_std = np.std(y_log)
+        y_normalized = (y_log - y_mean) / y_std
+
+        # Split data
+        if validation:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_normalized, test_size=test_size, random_state=42
+            )
+            logger.info(f"Train set: {X_train.shape[0]}, Test set: {X_test.shape[0]}")
+        else:
+            # Use all data for training (for final model)
+            X_train, y_train = X, y_normalized
+            X_test, y_test = X[:100], y_normalized[:100]  # Small test set for evaluation
+            logger.info(f"Using full dataset for training: {X_train.shape[0]} samples")
+
+        # Convert to tensors
+        X_train = torch.FloatTensor(X_train)
+        y_train = torch.FloatTensor(y_train).unsqueeze(1)
+        X_test = torch.FloatTensor(X_test)
+        y_test = torch.FloatTensor(y_test).unsqueeze(1)
+
+        # Create the enhanced predictor
+        logger.info(f"Initializing enhanced predictor with input dim: {X_train.shape[1]}")
+        predictor = EnhancedUpvotePredictor(X_train.shape[1])
+
+        # Training parameters
+        # Lower learning rate and higher weight decay for better regularization
+        optimizer = optim.AdamW(
+            predictor.parameters(),
+            lr=0.0005,  # Lower learning rate for more stable training
+            weight_decay=0.03  # Increased weight decay for better regularization
+        )
+
+        # Learning rate scheduler for dynamic adjustment
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=7,
+            verbose=True
+        )
+
+        # Use a combination of MSE (for accuracy) and Huber (for robustness)
+        mse_criterion = nn.MSELoss()
+        huber_criterion = nn.SmoothL1Loss()
+
+        # Training loop with improved early stopping
+        patience = 20  # Increased patience
+        best_rmse = float('inf')
+        patience_counter = 0
+        max_epochs = 150  # Increased maximum epochs
+
+        # Lists for tracking metrics
+        train_losses = []
+        test_losses = []
+        train_rmses = []
+        test_rmses = []
+        spearman_corrs = []  # Track rank correlation
+
+        # Mini-batch training
+        batch_size = 128
+        train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True
+        )
+
+        logger.info(f"Starting training with {max_epochs} max epochs, patience={patience}")
+
+        for epoch in range(max_epochs):
+            # Training phase
+            predictor.train()
+            epoch_loss = 0.0
+            num_batches = 0
+
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+
+                # Forward pass
+                outputs = predictor(X_batch)
+
+                # Combined loss
+                mse_loss = mse_criterion(outputs, y_batch)
+                huber_loss = huber_criterion(outputs, y_batch)
+                loss = 0.7 * mse_loss + 0.3 * huber_loss  # Weighted combination
+
+                # Backward pass
+                loss.backward()
+
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(predictor.parameters(), max_norm=1.0)
+
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                num_batches += 1
+
+            avg_train_loss = epoch_loss / num_batches
+            train_losses.append(avg_train_loss)
+
+            # Evaluation phase
+            predictor.eval()
+            with torch.no_grad():
+                # Test set evaluation
+                test_outputs = predictor(X_test)
+                test_loss = 0.7 * mse_criterion(test_outputs, y_test) + 0.3 * huber_criterion(test_outputs, y_test)
+                test_losses.append(test_loss.item())
+
+                # Denormalize for RMSE calculation
+                train_outputs = predictor(X_train)
+                train_preds_orig = np.expm1(train_outputs.numpy() * y_std + y_mean)
+                train_true_orig = np.expm1(y_train.numpy() * y_std + y_mean)
+                test_preds_orig = np.expm1(test_outputs.numpy() * y_std + y_mean)
+                test_true_orig = np.expm1(y_test.numpy() * y_std + y_mean)
+
+                # Calculate RMSE
+                train_rmse = np.sqrt(np.mean((train_preds_orig - train_true_orig) ** 2))
+                test_rmse = np.sqrt(np.mean((test_preds_orig - test_true_orig) ** 2))
+
+                train_rmses.append(train_rmse)
+                test_rmses.append(test_rmse)
+
+                # Calculate Spearman's rank correlation
+                from scipy.stats import spearmanr
+                corr, _ = spearmanr(test_preds_orig.flatten(), test_true_orig.flatten())
+                spearman_corrs.append(corr)
+
+                # Log progress
+                if epoch % 5 == 0:
+                    logger.info(f"Epoch {epoch + 1}/{max_epochs}")
+                    logger.info(f"Train Loss: {avg_train_loss:.6f}, Test Loss: {test_loss.item():.6f}")
+                    logger.info(f"Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
+                    logger.info(f"Spearman Correlation: {corr:.4f}")
+                    logger.info(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+
+                # Update learning rate based on test loss
+                scheduler.step(test_loss.item())
+
+                # Check for improvement
+                if test_rmse < best_rmse:
+                    improvement = (best_rmse - test_rmse) / best_rmse * 100
+                    best_rmse = test_rmse
+                    patience_counter = 0
+
+                    # Save the best model
+                    torch.save(predictor.state_dict(), 'best_predictor_model.pth')
+                    logger.info(f"New best model saved with RMSE: {best_rmse:.2f} (improved by {improvement:.2f}%)")
+                else:
+                    patience_counter += 1
+
+                # Early stopping check
                 if patience_counter >= patience:
-                    print("Early stopping")
+                    logger.info(f"Early stopping at epoch {epoch + 1}")
                     break
 
-    return predictor
+        # Load the best model for return
+        try:
+            predictor.load_state_dict(torch.load('best_predictor_model.pth'))
+            logger.info("Loaded best model for return")
+
+            # Plot training metrics
+            try:
+                import matplotlib.pyplot as plt
+
+                # Create figure with 3 subplots
+                plt.figure(figsize=(18, 6))
+
+                # Plot loss
+                plt.subplot(1, 3, 1)
+                plt.plot(train_losses, label='Train Loss')
+                plt.plot(test_losses, label='Test Loss')
+                plt.title('Loss During Training')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss')
+                plt.legend()
+
+                # Plot RMSE
+                plt.subplot(1, 3, 2)
+                plt.plot(train_rmses, label='Train RMSE')
+                plt.plot(test_rmses, label='Test RMSE')
+                plt.title('RMSE During Training')
+                plt.xlabel('Epoch')
+                plt.ylabel('RMSE')
+                plt.legend()
+
+                # Plot Spearman correlation
+                plt.subplot(1, 3, 3)
+                plt.plot(spearman_corrs)
+                plt.title('Spearman Rank Correlation')
+                plt.xlabel('Epoch')
+                plt.ylabel('Correlation')
+                plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+
+                plt.tight_layout()
+                plt.savefig('upvote_predictor_metrics.png')
+                logger.info("Saved training metrics plot")
+            except Exception as plot_error:
+                logger.error(f"Error creating plots: {plot_error}")
+        except Exception as load_error:
+            logger.error(f"Error loading best model: {load_error}")
+
+        # Final evaluation
+        logger.info(f"Final best RMSE: {best_rmse:.2f}")
+        logger.info(f"Final Spearman Correlation: {spearman_corrs[-1]:.4f}")
+
+        # Save y normalization parameters for inference
+        try:
+            normalization_params = {
+                'y_mean': float(y_mean),
+                'y_std': float(y_std)
+            }
+            with open('normalization_params.json', 'w') as f:
+                import json
+                json.dump(normalization_params, f)
+            logger.info("Saved normalization parameters for inference")
+        except Exception as e:
+            logger.error(f"Error saving normalization parameters: {e}")
+
+        return predictor, y_mean, y_std
+
+    except Exception as e:
+        logger.error(f"Unexpected error in upvote predictor training: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None, None
 
 
 def generate_synthetic_hn_data(base_data, additional_samples=1000):
@@ -1184,19 +1575,42 @@ def main():
 
     try:
         # Log start of process
-        logger.info("Starting Hacker News Upvote Predictor Training")
+        logger.info("Starting Enhanced Hacker News Upvote Predictor Training")
         logger.info(f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Load and preprocess Hacker News corpus
+        # Load and preprocess Hacker News corpus - use more data (100K instead of 50K)
         logger.info("Loading Hacker News corpus")
         try:
-            corpus_file, df = load_hacker_news_corpus('df_200K.csv', limit=50000)
+            corpus_file, df = load_hacker_news_corpus('df_200K.csv', limit=100000)
             logger.info(f"Corpus loaded. Total titles: {len(df)}")
 
-            # Check DataFrame structure
+            # Check DataFrame structure and analyze data distribution
             logger.info(f"DataFrame columns: {df.columns.tolist()}")
-            logger.info(f"Sample title: {df['title'].iloc[0]}")
             logger.info(f"Upvotes range: {df['upvotes'].min()} to {df['upvotes'].max()}")
+
+            # Calculate and log statistics about upvotes
+            upvotes = df['upvotes'].values
+            logger.info(f"Upvote statistics:")
+            logger.info(f"  Mean: {np.mean(upvotes):.2f}")
+            logger.info(f"  Median: {np.median(upvotes):.2f}")
+            logger.info(f"  Std Dev: {np.std(upvotes):.2f}")
+            logger.info(f"  25th percentile: {np.percentile(upvotes, 25):.2f}")
+            logger.info(f"  75th percentile: {np.percentile(upvotes, 75):.2f}")
+            logger.info(f"  90th percentile: {np.percentile(upvotes, 90):.2f}")
+
+            # Optional: Plot histogram of upvotes (helps understand distribution)
+            try:
+                import matplotlib.pyplot as plt
+                plt.figure(figsize=(10, 6))
+                plt.hist(np.clip(upvotes, 0, 500), bins=50)
+                plt.title('Distribution of Upvotes (clipped at 500)')
+                plt.xlabel('Upvotes')
+                plt.ylabel('Frequency')
+                plt.savefig('upvote_distribution.png')
+                logger.info("Saved upvote distribution histogram")
+            except Exception as plot_error:
+                logger.warning(f"Error creating histogram: {plot_error}")
+
         except Exception as corpus_error:
             logger.error(f"Error loading corpus: {corpus_error}")
             import traceback
@@ -1207,32 +1621,29 @@ def main():
         sys.stdout.flush()
         sys.stderr.flush()
 
-        # MODIFICATION: Load existing Word2Vec model instead of training
+        # Load pre-trained Word2Vec model
         logger.info("Loading pre-trained Word2Vec Model")
         try:
-            # Initialize a new Word2Vec model with the same parameters
+            # Initialize model
             model = Word2Vec(
-                vector_size=50,
+                vector_size=100,  # Make sure this matches your original model
                 window_size=5,
                 min_count=3,
-                negative_samples=15,
+                negative_samples=25,
                 learning_rate=0.0015,
                 epochs=15,
                 batch_size=1024
             )
 
-            # Load the existing weights
+            # Load existing weights
             word2vec_weights_path = 'HN_Corpus_Model_Weights.txt'
             model.load(word2vec_weights_path)
-            logger.info(f"Successfully loaded Word2Vec weights from: {word2vec_weights_path}")
-            logger.info(f"Vocabulary size: {len(model.vocab)}")
-            logger.info(f"Embedding dimension: {model.vector_size}")
+            logger.info(f"Successfully loaded Word2Vec weights with {len(model.vocab)} words")
 
-            # Test a few vectors to ensure they loaded correctly
-            test_words = ['show', 'ask', 'tell', 'python', 'javascript']
-            for word in test_words:
-                if word in model.word_to_idx:
-                    logger.info(f"Found vector for '{word}'")
+            # Verify a few key words exist in the vocabulary
+            important_words = ['show', 'ask', 'tell', 'how', 'why', 'what', 'guide', 'tutorial']
+            found_words = [word for word in important_words if word in model.word_to_idx]
+            logger.info(f"Found {len(found_words)}/{len(important_words)} important keywords")
 
         except Exception as load_error:
             logger.error(f"Error loading Word2Vec weights: {load_error}")
@@ -1240,64 +1651,308 @@ def main():
             logger.error(traceback.format_exc())
             raise
 
-        # Ensure logs are flushed before starting the next phase
-        sys.stdout.flush()
-        sys.stderr.flush()
-
-        # Train upvote predictor with improved logging
-        logger.info("Starting Upvote Predictor Training")
+        # Train enhanced upvote predictor
+        logger.info("Starting Enhanced Upvote Predictor Training")
         try:
-            predictor = train_hacker_news_upvote_predictor(model, df)
+            predictor, y_mean, y_std = train_improved_upvote_predictor(model, df)
+
             if predictor is not None:
-                logger.info("Upvote Predictor Training Completed Successfully")
+                logger.info("Enhanced Upvote Predictor Training Completed Successfully")
             else:
                 logger.error("Upvote Predictor Training Failed")
+                return model, None
+
         except Exception as predictor_error:
-            logger.error(f"Error during Upvote Predictor training: {predictor_error}")
+            logger.error(f"Error during Enhanced Upvote Predictor training: {predictor_error}")
             import traceback
             logger.error(traceback.format_exc())
             return model, None
 
-        # Ensure logs are flushed
-        sys.stdout.flush()
-        sys.stderr.flush()
-
-        # Save predictor weights with detailed logging
+        # Save the trained predictor
         if predictor is not None:
-            predictor_weights_path = 'HN_Upvote_Predictor_Weights.pth'
             try:
-                # Save the full model
-                torch.save(predictor.state_dict(), predictor_weights_path)
-                logger.info(f"Upvote Predictor weights saved to: {predictor_weights_path}")
+                # Save full model in PyTorch format
+                enhanced_predictor_path = 'Enhanced_HN_Predictor.pth'
+                torch.save(predictor.state_dict(), enhanced_predictor_path)
+                logger.info(f"Saved enhanced predictor to {enhanced_predictor_path}")
 
-                # Also save in readable text format
-                readable_weights_path = 'HN_Upvote_Predictor_Weights.txt'
-                with open(readable_weights_path, 'w') as f:
-                    # Save input dimension and model architecture details
-                    input_dim = predictor.model[0].in_features
-                    f.write(f"Input Dimension: {input_dim}\n")
-                    f.write(f"Model Architecture: {predictor}\n\n")
+                # Also save a readable summary
+                readable_path = 'Enhanced_HN_Predictor_Summary.txt'
+                with open(readable_path, 'w') as f:
+                    # Model architecture
+                    f.write(f"Enhanced Upvote Predictor Architecture:\n")
+                    f.write(f"{predictor}\n\n")
 
-                    # Save information about parameters
+                    # Input dimension
+                    input_dim = predictor.main_network[0].in_features
+                    f.write(f"Input dimension: {input_dim}\n\n")
+
+                    # Normalization parameters
+                    f.write(f"Normalization parameters:\n")
+                    f.write(f"  y_mean: {y_mean}\n")
+                    f.write(f"  y_std: {y_std}\n\n")
+
+                    # Parameter counts
+                    total_params = sum(p.numel() for p in predictor.parameters())
+                    trainable_params = sum(p.numel() for p in predictor.parameters() if p.requires_grad)
+                    f.write(f"Total parameters: {total_params:,}\n")
+                    f.write(f"Trainable parameters: {trainable_params:,}\n\n")
+
+                    # Sample parameters (first few values of each layer)
+                    f.write("Sample parameter values:\n")
                     for name, param in predictor.named_parameters():
-                        f.write(f"Parameter: {name}\n")
-                        f.write(f"Shape: {param.shape}\n")
-                        # Convert to numpy and limit to first few values
-                        first_few_values = param.detach().numpy().flatten()[:5]
-                        f.write(f"Sample values: {first_few_values}\n\n")
+                        if param.dim() > 0:  # Skip empty parameters
+                            f.write(f"  {name}: Shape {param.shape}\n")
+                            flat_values = param.detach().numpy().flatten()[:5]
+                            f.write(f"    First 5 values: {flat_values}\n")
 
-                logger.info(f"Readable parameter description saved to: {readable_weights_path}")
+                logger.info(f"Saved readable model summary to {readable_path}")
 
-            except Exception as predictor_save_error:
-                logger.error(f"Failed to save Upvote Predictor weights: {predictor_save_error}")
+                # Save normalization parameters for inference
+                norm_params_path = 'normalization_params.json'
+                with open(norm_params_path, 'w') as f:
+                    import json
+                    json.dump({
+                        'y_mean': float(y_mean),
+                        'y_std': float(y_std)
+                    }, f)
+                logger.info(f"Saved normalization parameters to {norm_params_path}")
+
+                # Create a sample test script for interactive evaluation
+                test_script_path = 'test_enhanced_predictor.py'
+                with open(test_script_path, 'w') as f:
+                    f.write("""
+import torch
+import torch.nn as nn
+import numpy as np
+import json
+import sys
+import os
+import re
+
+# Define the necessary model classes
+class EnhancedUpvotePredictor(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+
+        # Attention mechanism for input features
+        self.attention = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+            nn.Softmax(dim=1)
+        )
+
+        # Main network with increased width and depth
+        self.main_network = nn.Sequential(
+            # Layer 1
+            nn.Linear(input_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.5),
+
+            # Layer 2
+            nn.Linear(512, 384),
+            nn.BatchNorm1d(384),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.5),
+
+            # Layer 3
+            nn.Linear(384, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.45),
+
+            # Layer 4
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.4),
+
+            # Layer 5
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
+
+            # Output layer
+            nn.Linear(64, 1),
+            nn.ReLU()  # Ensure predictions are non-negative
+        )
+
+    def forward(self, x):
+        # Apply attention mechanism
+        batch_size = x.shape[0]
+        attention_weights = self.attention(x.unsqueeze(2).transpose(1, 2))
+        attended_input = torch.bmm(attention_weights.transpose(1, 2), x.unsqueeze(2)).squeeze(2)
+
+        # Residual connection - combine attended features with original
+        enhanced_input = x + attended_input
+
+        # Pass through main network
+        return self.main_network(enhanced_input)
+
+class Word2Vec:
+    def __init__(self, vector_size=100):
+        self.vector_size = vector_size
+        self.word_to_idx = {}
+        self.idx_to_word = {}
+        self.vocab = []
+        self.embeddings = None
+
+    def _preprocess_text(self, text):
+        text = text.lower()
+        text = re.sub(r'[^\\w\\s]', '', text)
+        text = re.sub(r'\\d+', '', text)
+        return [word for word in text.split() if len(word) > 1]
+
+    def load(self, filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            header = f.readline().split()
+            vocab_size = int(header[0])
+            self.vector_size = int(header[1])
+
+            self.embeddings = np.zeros((vocab_size, self.vector_size))
+
+            for i, line in enumerate(f):
+                parts = line.rstrip().split(' ')
+                word = parts[0]
+
+                self.word_to_idx[word] = i
+                self.idx_to_word[i] = word
+                self.vocab.append(word)
+
+                self.embeddings[i] = np.array([float(x) for x in parts[1:]])
+
+        return self
+
+    def get_vector(self, word):
+        if word in self.word_to_idx:
+            idx = self.word_to_idx[word]
+            return self.embeddings[idx]
+        return None
+
+def create_enhanced_embedding(title, model):
+    \"\"\"Simplified embedding creation for prediction\"\"\"
+    words = model._preprocess_text(str(title))
+
+    if not words:
+        return np.zeros(model.vector_size + 15)
+
+    vectors = []
+    word_weights = []
+    word_lengths = []
+
+    hn_markers = ['show', 'ask', 'tell']
+    tech_keywords = ['app', 'code', 'software', 'programming', 'data', 'api', 
+                     'python', 'javascript', 'web', 'neural', 'ai', 'ml']
+
+    for word in words:
+        vec = model.get_vector(word)
+        if vec is not None:
+            position = words.index(word)
+            position_weight = 1.5 if position == 0 or position == len(words) - 1 else 1.0
+            vectors.append(vec)
+            word_weights.append(position_weight)
+            word_lengths.append(len(word))
+
+    if not vectors:
+        return np.zeros(model.vector_size + 15)
+
+    doc_vector = np.average(vectors, axis=0, weights=word_weights)
+
+    title_length = len(words)
+    title_length_squared = title_length ** 2
+    avg_word_length = np.mean(word_lengths)
+    max_word_length = max(word_lengths)
+    uppercase_count = sum(1 for word in words if word.isupper())
+
+    has_marker = 1 if any(marker in words for marker in hn_markers) else 0
+    marker_position = next((words.index(w) for w in words if w in hn_markers), -1)
+    marker_position_normalized = marker_position / len(words) if marker_position >= 0 else -0.1
+
+    tech_keyword_count = sum(1 for word in words if word in tech_keywords)
+    tech_keyword_ratio = tech_keyword_count / len(words)
+
+    positive_words = ['best', 'great', 'amazing', 'excellent', 'awesome', 'free', 'new']
+    negative_words = ['bug', 'issue', 'problem', 'error', 'fail', 'broken']
+    positive_count = sum(1 for word in words if word in positive_words)
+    negative_count = sum(1 for word in words if word in negative_words)
+    sentiment_score = (positive_count - negative_count) / len(words)
+
+    features = [
+        title_length,
+        title_length_squared,
+        avg_word_length,
+        max_word_length,
+        uppercase_count,
+        has_marker,
+        marker_position_normalized,
+        tech_keyword_count,
+        tech_keyword_ratio,
+        sentiment_score,
+        0.0, 0.0, 0.0, 0.0, 0.0  # Placeholder values for upvote features
+    ]
+
+    return np.concatenate([doc_vector, features])
+
+def predict_upvotes(title):
+    # Load normalization parameters
+    with open('normalization_params.json', 'r') as f:
+        norm_params = json.load(f)
+    y_mean = norm_params['y_mean']
+    y_std = norm_params['y_std']
+
+    # Load Word2Vec model
+    model = Word2Vec()
+    model.load('HN_Corpus_Model_Weights.txt')
+
+    # Create document embedding
+    doc_vector = create_enhanced_embedding(title, model)
+
+    # Convert to tensor
+    X = torch.FloatTensor(doc_vector).unsqueeze(0)
+
+    # Load model
+    predictor = EnhancedUpvotePredictor(X.shape[1])
+    predictor.load_state_dict(torch.load('Enhanced_HN_Predictor.pth'))
+    predictor.eval()
+
+    # Make prediction
+    with torch.no_grad():
+        normalized_prediction = predictor(X).item()
+
+    # Denormalize
+    prediction = np.expm1(normalized_prediction * y_std + y_mean)
+    return max(0, int(round(prediction)))
+
+def main():
+    if len(sys.argv) > 1:
+        # Use command line argument as title
+        title = ' '.join(sys.argv[1:])
+    else:
+        # Interactive mode
+        title = input("Enter a Hacker News title: ")
+
+    score = predict_upvotes(title)
+    print(f"Predicted score: {score}")
+
+if __name__ == "__main__":
+    main()
+""")
+
+                logger.info(f"Created sample test script at {test_script_path}")
+
+            except Exception as save_error:
+                logger.error(f"Error saving enhanced predictor: {save_error}")
                 import traceback
                 logger.error(traceback.format_exc())
 
-        logger.info("Model Training and Saving Process Completed Successfully")
-        return model, predictor
+        logger.info("Enhanced Model Training and Saving Process Completed Successfully")
+        return model, predictor, y_mean, y_std
 
     except Exception as e:
-        logger.error(f"Unexpected error during model training: {e}")
+        logger.error(f"Unexpected error during training: {e}")
         import traceback
         logger.error(traceback.format_exc())
         raise

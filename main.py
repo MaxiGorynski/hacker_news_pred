@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
-
-model.load("./gpu-files/hn_files/HN_Upvote_Predictor_Weights.pth")
+import os
+from Hacker_News_Score_Predictor import call_and_response as model
 
 app = FastAPI()
 
@@ -23,6 +23,5 @@ def form():
 
 @app.post("/predictions")
 async def get_prediction(title: str = Form(...)):
-    # your “model” that returns an int
-    result: int = len(title)          
+    result: int = model(title)         
     return {"prediction": result}

@@ -302,5 +302,83 @@ def main():
         logger.error(traceback.format_exc())
 
 
+#Copy of main() repurposed to respond directly to single input
+def call_and_response(user_input: str)-> int:
+    try:
+        # Dynamically find the files
+        word2vec_path = find_file('HN_Corpus_Model_Weights.txt')
+        predictor_path = find_file('best_predictor_model.pth')
+        hn_data_path = find_file('df_200K.csv')
+
+        logger.info("Loading models...")
+
+        # Load Word2Vec model
+        try:
+            w2v_model = Word2Vec()
+            w2v_model.load(word2vec_path)
+            logger.info(f"Word2Vec model loaded with {len(w2v_model.vocab)} words")
+        except Exception as e:
+            logger.error(f"Error loading Word2Vec model: {e}")
+            return
+
+        # Load upvote predictor - FIXED: Use exactly 106 as input dimension
+        try:
+            # Create predictor with the exact input dimension from the trained model
+            input_dim = 106  # Fix this to match the trained model (100 for embedding + 6 features)
+            predictor = EnhancedUpvotePredictor(input_dim)
+
+            # Load weights
+            predictor.load_state_dict(torch.load(predictor_path))
+            logger.info("Upvote predictor model loaded")
+        except Exception as e:
+            logger.error(f"Error loading predictor model: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return
+
+        # Load sample HN data for comparison
+        real_scores = load_hn_data(hn_data_path)
+        logger.info(f"Loaded {len(real_scores)} real HN titles for comparison")
+
+        # Calculate log transform parameters from the data
+        upvotes = np.array(list(real_scores.values()))
+        log_upvotes = np.log1p(upvotes)
+        y_mean = np.mean(log_upvotes)
+        y_std = np.std(log_upvotes)
+        logger.info(f"Calculated normalization parameters: mean={y_mean:.4f}, std={y_std:.4f}")
+
+        title = user_input
+        predicted_score = predict_upvotes(title, w2v_model, predictor, y_mean, y_std)
+            
+        print(f"\nTitle: \"{title}\"")
+        print(f"Predicted score: {predicted_score}")
+
+        # Check if this is similar to a real title we have
+        most_similar = None
+        highest_sim = -1
+
+        for real_title in real_scores:
+        # Simple similarity measure: word overlap
+            title_words = set(w2v_model._preprocess_text(title))
+            real_words = set(w2v_model._preprocess_text(real_title))
+
+            if title_words and real_words:
+                overlap = len(title_words.intersection(real_words)) / len(title_words.union(real_words))
+                if overlap > highest_sim and overlap > 0.5:  # At least 50% similarity
+                    highest_sim = overlap
+                    most_similar = real_title
+
+        if most_similar:
+            print(f"\nSimilar real title: \"{most_similar}\"")
+            print(f"Real score: {real_scores[most_similar]}")
+            print(f"Similarity: {highest_sim:.1%}")
+        
+        return predicted_score
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch import cosine_similarity
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 import numpy as np
 import re
 from collections import Counter, defaultdict
@@ -18,6 +19,8 @@ import pandas as pd
 import numpy as np
 import torch
 from datetime import datetime
+import sys
+import logging
 
 
 
@@ -625,66 +628,113 @@ class EnhancedUpvotePredictor(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
 
-        # Attention mechanism for input features
+        # Attention mechanism with more sophisticated weighting
         self.attention = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, input_dim),  # Changed to match input_dim
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, input_dim),
             nn.Softmax(dim=1)
         )
 
-        # Main network with increased width and depth
+        # Main network with enhanced regularization and depth
         self.main_network = nn.Sequential(
-            # Layer 1
-            nn.Linear(input_dim, 512),
+            # Layer 1 - Expanded input layer
+            nn.Linear(input_dim, 768),
+            nn.BatchNorm1d(768),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.6),
+
+            # Layer 2 - Deeper network with increased width
+            nn.Linear(768, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2),
             nn.Dropout(0.5),
 
-            # Layer 2
+            # Layer 3 - Additional complexity
             nn.Linear(512, 384),
             nn.BatchNorm1d(384),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.5),
+            nn.Dropout(0.45),
 
-            # Layer 3
+            # Layer 4 - Continued depth
             nn.Linear(384, 256),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.45),
+            nn.Dropout(0.4),
 
-            # Layer 4
+            # Layer 5 - Further refinement
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.4),
-
-            # Layer 5
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(0.2),
             nn.Dropout(0.3),
 
-            # Output layer
-            nn.Linear(64, 1),
-            nn.ReLU()  # Ensure predictions are non-negative
+            # Final layer with explicit initialization
+            nn.Linear(128, 1)
         )
 
+        # Custom weight initialization
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Enhanced weight initialization to prevent early saturation"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Use Kaiming initialization with increased gain
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
+
+                # Initialize biases to small constant
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.01)
+
     def forward(self, x):
-        # Apply attention mechanism (fixed version)
+        # Apply sophisticated attention mechanism
         attention_weights = self.attention(x)
 
-        # Element-wise multiplication of input features with attention weights
+        # Element-wise multiplication with residual connection
         attended_input = x * attention_weights
-
-        # Residual connection - combine attended features with original
         enhanced_input = x + attended_input
+
+        # Additional feature diversity regularization
+        # This helps prevent the model from collapsing to a constant prediction
+        diversity_factor = torch.std(enhanced_input, dim=0)
+        enhanced_input = enhanced_input * (1 + 0.1 * diversity_factor)
 
         # Pass through main network
         return self.main_network(enhanced_input)
 
+    # Custom loss function to prevent constant predictions
 
-def create_enhanced_embedding(title, model, upvotes=None, upvote_mean=None, upvote_median=None, upvote_q75=None):
+
+def diversity_loss(predictions, targets, alpha=0.1):
+    """
+    Combines MSE with a diversity penalty to discourage constant predictions
+
+    Args:
+    - predictions: Model's predictions
+    - targets: True target values
+    - alpha: Strength of diversity penalty
+
+    Returns:
+    - Combined loss value
+    """
+    # Standard Mean Squared Error
+    mse_loss = F.mse_loss(predictions, targets)
+
+    # Diversity penalty - encourage variation in predictions
+    prediction_std = torch.std(predictions)
+    diversity_penalty = -prediction_std  # Maximize standard deviation
+
+    # Combined loss
+    return mse_loss + alpha * diversity_penalty
+
+
+def create_enhanced_embedding(title,
+    model,
+    upvotes=None,
+    upvote_mean=None,
+    upvote_median=None,
+    upvote_q75=None,
+    upvote_percentiles=None):
     """
     Create enhanced document embedding with sophisticated feature engineering
 
@@ -791,49 +841,36 @@ def create_enhanced_embedding(title, model, upvotes=None, upvote_mean=None, upvo
         ]
 
         # Optional: Add upvote-related features for training
-        if upvotes is not None and upvote_mean is not None:
-            # Log-transform and normalize upvotes
-            log_upvotes = np.log1p(upvotes)
-
-            # Create relative indicators
-            is_above_mean = 1.0 if upvotes > np.exp(upvote_mean) else 0.0
-            is_above_median = 1.0 if upvotes > upvote_median else 0.0
-            is_high_performer = 1.0 if upvotes > upvote_q75 else 0.0
-            percentile_approx = min(1.0, upvotes / (upvote_q75 * 2))
-
+        if upvotes is not None and upvote_percentiles is not None:
             upvote_features = [
-                log_upvotes,
-                is_above_mean,
-                is_above_median,
-                is_high_performer,
-                percentile_approx
+                np.log1p(upvotes),  # Log-transformed upvotes
+                1 if upvotes > upvote_percentiles[75] else 0,  # High upvote indicator
+                1 if upvotes > upvote_percentiles[90] else 0,  # Very high upvote indicator
+                np.clip(upvotes / upvote_percentiles[90], 0, 1),  # Normalized upvote score
+                np.sign(upvotes)  # Binary sign of upvotes
             ]
-
-            # Return embedding + all features
-            return np.concatenate([doc_vector, basic_features, upvote_features])
         else:
-            # For prediction, add placeholder zeros for upvote features
-            upvote_features = [0.0, 0.0, 0.0, 0.0, 0.0]
-            return np.concatenate([doc_vector, basic_features, upvote_features])
+            upvote_features = [0, 0, 0, 0, 0]
 
     except Exception as e:
         # Fallback for any errors
         logging.error(f"Error in document embedding: {e}")
         return np.zeros(model.vector_size + 15)  # Adjust size based on feature count
 
-def train_upvote_predictor(model, df, test_size=0.2, validation=True):
+
+def train_hacker_news_upvote_predictor(model, df, test_size=0.2, validation=True):
     """
-        Enhanced training function with better hyperparameters and evaluation
+    Enhanced training function with improved diversity and regularization
 
-        Args:
-            model: Word2Vec model with embeddings
-            df: DataFrame with titles and upvotes
-            test_size: Fraction of data to use for testing
-            validation: Whether to use validation set (if False, use all for training)
+    Args:
+        model: Word2Vec model with embeddings
+        df: DataFrame with titles and upvotes
+        test_size: Fraction of data to use for testing
+        validation: Whether to use validation set (if False, use all for training)
 
-        Returns:
-            Trained predictor model
-        """
+    Returns:
+        Trained predictor model, normalization parameters
+    """
     # Get logger
     logger = logging.getLogger(__name__)
 
@@ -848,7 +885,7 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
         # Track progress with tqdm
         from tqdm import tqdm
 
-        # Compute statistics for better scaling/normalization
+        # Compute robust statistics for normalization
         upvotes_array = np.array(df['upvotes'])
         log_upvotes = np.log1p(upvotes_array)
         upvote_mean = np.mean(log_upvotes)
@@ -859,6 +896,30 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
         logger.info(f"Upvote statistics - Mean: {upvote_mean:.4f}, Std: {upvote_std:.4f}")
         logger.info(f"Median: {upvote_median}, 75th percentile: {upvote_q75}")
 
+        # Custom diversity loss function
+        def diversity_loss(predictions, targets, alpha=0.1):
+            """
+            Combines MSE with a diversity penalty to discourage constant predictions
+
+            Args:
+            - predictions: Model's predictions
+            - targets: True target values
+            - alpha: Strength of diversity penalty
+
+            Returns:
+            - Combined loss value
+            """
+            # Standard Mean Squared Error
+            mse_loss = F.mse_loss(predictions, targets)
+
+            # Diversity penalty - encourage variation in predictions
+            prediction_std = torch.std(predictions)
+            diversity_penalty = -prediction_std  # Maximize standard deviation
+
+            # Combined loss with weighted diversity penalty
+            return mse_loss + alpha * diversity_penalty
+
+        # Embedding creation with progress tracking
         for idx, row in tqdm(df.iterrows(), total=len(df), desc="Creating embeddings"):
             try:
                 title = row['title']
@@ -889,22 +950,22 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
 
         logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
 
-        # Apply log transform and normalization to target
+        # Robust log transform and normalization
         y_log = np.log1p(y)
         y_mean = np.mean(y_log)
         y_std = np.std(y_log)
         y_normalized = (y_log - y_mean) / y_std
 
-        # Split data
+        # Data splitting
         if validation:
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y_normalized, test_size=test_size, random_state=42
             )
             logger.info(f"Train set: {X_train.shape[0]}, Test set: {X_test.shape[0]}")
         else:
-            # Use all data for training (for final model)
+            # Use all data for training
             X_train, y_train = X, y_normalized
-            X_test, y_test = X[:100], y_normalized[:100]  # Small test set for evaluation
+            X_test, y_test = X[:100], y_normalized[:100]
             logger.info(f"Using full dataset for training: {X_train.shape[0]} samples")
 
         # Convert to tensors
@@ -913,43 +974,38 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
         X_test = torch.FloatTensor(X_test)
         y_test = torch.FloatTensor(y_test).unsqueeze(1)
 
-        # Create the enhanced predictor
+        # Create enhanced predictor
         logger.info(f"Initializing enhanced predictor with input dim: {X_train.shape[1]}")
         predictor = EnhancedUpvotePredictor(X_train.shape[1])
 
-        # Training parameters
-        # Lower learning rate and higher weight decay for better regularization
+        # Advanced optimizer configuration
         optimizer = optim.AdamW(
             predictor.parameters(),
-            lr=0.0005,  # Lower learning rate for more stable training
-            weight_decay=0.03  # Increased weight decay for better regularization
+            lr=0.0005,  # Stable learning rate
+            weight_decay=0.03,  # Regularization
+            betas=(0.9, 0.999)  # Adaptive momentum
         )
 
-        # Learning rate scheduler for dynamic adjustment
+        # Learning rate scheduler with more aggressive reduction
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
             factor=0.5,
-            patience=7,
+            patience=5,
             verbose=True
         )
 
-        # Use a combination of MSE (for accuracy) and Huber (for robustness)
-        mse_criterion = nn.MSELoss()
-        huber_criterion = nn.SmoothL1Loss()
-
-        # Training loop with improved early stopping
-        patience = 20  # Increased patience
+        # Training hyperparameters
+        patience = 15
         best_rmse = float('inf')
         patience_counter = 0
-        max_epochs = 150  # Increased maximum epochs
+        max_epochs = 200
 
-        # Lists for tracking metrics
-        train_losses = []
-        test_losses = []
-        train_rmses = []
-        test_rmses = []
-        spearman_corrs = []  # Track rank correlation
+        # Metric tracking
+        train_losses, test_losses = [], []
+        train_rmses, test_rmses = [], []
+        prediction_stds = []
+        spearman_corrs = []
 
         # Mini-batch training
         batch_size = 128
@@ -958,7 +1014,7 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
             train_dataset, batch_size=batch_size, shuffle=True
         )
 
-        logger.info(f"Starting training with {max_epochs} max epochs, patience={patience}")
+        logger.info(f"Starting training with {max_epochs} max epochs")
 
         for epoch in range(max_epochs):
             # Training phase
@@ -972,15 +1028,13 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
                 # Forward pass
                 outputs = predictor(X_batch)
 
-                # Combined loss
-                mse_loss = mse_criterion(outputs, y_batch)
-                huber_loss = huber_criterion(outputs, y_batch)
-                loss = 0.7 * mse_loss + 0.3 * huber_loss  # Weighted combination
+                # Custom diversity loss
+                loss = diversity_loss(outputs, y_batch)
 
                 # Backward pass
                 loss.backward()
 
-                # Gradient clipping to prevent exploding gradients
+                # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(predictor.parameters(), max_norm=1.0)
 
                 optimizer.step()
@@ -996,107 +1050,106 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
             with torch.no_grad():
                 # Test set evaluation
                 test_outputs = predictor(X_test)
-                test_loss = 0.7 * mse_criterion(test_outputs, y_test) + 0.3 * huber_criterion(test_outputs, y_test)
+                test_loss = diversity_loss(test_outputs, y_test)
                 test_losses.append(test_loss.item())
 
-                # Denormalize for RMSE calculation
+                # Denormalize predictions
                 train_outputs = predictor(X_train)
                 train_preds_orig = np.expm1(train_outputs.numpy() * y_std + y_mean)
                 train_true_orig = np.expm1(y_train.numpy() * y_std + y_mean)
                 test_preds_orig = np.expm1(test_outputs.numpy() * y_std + y_mean)
                 test_true_orig = np.expm1(y_test.numpy() * y_std + y_mean)
 
-                # Calculate RMSE
+                # Calculate RMSE and prediction diversity
                 train_rmse = np.sqrt(np.mean((train_preds_orig - train_true_orig) ** 2))
                 test_rmse = np.sqrt(np.mean((test_preds_orig - test_true_orig) ** 2))
+                pred_std = np.std(test_preds_orig)
 
                 train_rmses.append(train_rmse)
                 test_rmses.append(test_rmse)
+                prediction_stds.append(pred_std)
 
-                # Calculate Spearman's rank correlation
+                # Rank correlation
                 from scipy.stats import spearmanr
                 corr, _ = spearmanr(test_preds_orig.flatten(), test_true_orig.flatten())
                 spearman_corrs.append(corr)
 
-                # Log progress
+                # Progress logging
                 if epoch % 5 == 0:
                     logger.info(f"Epoch {epoch + 1}/{max_epochs}")
                     logger.info(f"Train Loss: {avg_train_loss:.6f}, Test Loss: {test_loss.item():.6f}")
                     logger.info(f"Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
+                    logger.info(f"Prediction Std Dev: {pred_std:.4f}")
                     logger.info(f"Spearman Correlation: {corr:.4f}")
                     logger.info(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-                # Update learning rate based on test loss
+                # Update learning rate
                 scheduler.step(test_loss.item())
 
-                # Check for improvement
+                # Model checkpoint
                 if test_rmse < best_rmse:
                     improvement = (best_rmse - test_rmse) / best_rmse * 100
                     best_rmse = test_rmse
                     patience_counter = 0
-
-                    # Save the best model
                     torch.save(predictor.state_dict(), 'best_predictor_model.pth')
                     logger.info(f"New best model saved with RMSE: {best_rmse:.2f} (improved by {improvement:.2f}%)")
                 else:
                     patience_counter += 1
 
-                # Early stopping check
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                # Early stopping
+                if patience_counter >= patience or pred_std < 0.01:
+                    logger.info(f"Stopping training at epoch {epoch + 1}")
                     break
 
-        # Load the best model for return
+        # Load best model
+        predictor.load_state_dict(torch.load('best_predictor_model.pth'))
+        logger.info("Loaded best model")
+
+        # Create diagnostic plots
         try:
-            predictor.load_state_dict(torch.load('best_predictor_model.pth'))
-            logger.info("Loaded best model for return")
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(20, 6))
 
-            # Plot training metrics
-            try:
-                import matplotlib.pyplot as plt
+            # Loss plot
+            plt.subplot(1, 4, 1)
+            plt.plot(train_losses, label='Train Loss')
+            plt.plot(test_losses, label='Test Loss')
+            plt.title('Loss During Training')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
 
-                # Create figure with 3 subplots
-                plt.figure(figsize=(18, 6))
+            # RMSE plot
+            plt.subplot(1, 4, 2)
+            plt.plot(train_rmses, label='Train RMSE')
+            plt.plot(test_rmses, label='Test RMSE')
+            plt.title('RMSE During Training')
+            plt.xlabel('Epoch')
+            plt.ylabel('RMSE')
+            plt.legend()
 
-                # Plot loss
-                plt.subplot(1, 3, 1)
-                plt.plot(train_losses, label='Train Loss')
-                plt.plot(test_losses, label='Test Loss')
-                plt.title('Loss During Training')
-                plt.xlabel('Epoch')
-                plt.ylabel('Loss')
-                plt.legend()
+            # Prediction Standard Deviation
+            plt.subplot(1, 4, 3)
+            plt.plot(prediction_stds)
+            plt.title('Prediction Std Dev')
+            plt.xlabel('Epoch')
+            plt.ylabel('Std Dev')
 
-                # Plot RMSE
-                plt.subplot(1, 3, 2)
-                plt.plot(train_rmses, label='Train RMSE')
-                plt.plot(test_rmses, label='Test RMSE')
-                plt.title('RMSE During Training')
-                plt.xlabel('Epoch')
-                plt.ylabel('RMSE')
-                plt.legend()
+            # Spearman Correlation
+            plt.subplot(1, 4, 4)
+            plt.plot(spearman_corrs)
+            plt.title('Spearman Rank Correlation')
+            plt.xlabel('Epoch')
+            plt.ylabel('Correlation')
+            plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
 
-                # Plot Spearman correlation
-                plt.subplot(1, 3, 3)
-                plt.plot(spearman_corrs)
-                plt.title('Spearman Rank Correlation')
-                plt.xlabel('Epoch')
-                plt.ylabel('Correlation')
-                plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+            plt.tight_layout()
+            plt.savefig('upvote_predictor_metrics.png')
+            logger.info("Saved training metrics plot")
+        except Exception as e:
+            logger.error(f"Error creating diagnostic plots: {e}")
 
-                plt.tight_layout()
-                plt.savefig('upvote_predictor_metrics.png')
-                logger.info("Saved training metrics plot")
-            except Exception as plot_error:
-                logger.error(f"Error creating plots: {plot_error}")
-        except Exception as load_error:
-            logger.error(f"Error loading best model: {load_error}")
-
-        # Final evaluation
-        logger.info(f"Final best RMSE: {best_rmse:.2f}")
-        logger.info(f"Final Spearman Correlation: {spearman_corrs[-1]:.4f}")
-
-        # Save y normalization parameters for inference
+        # Save normalization parameters
         try:
             normalization_params = {
                 'y_mean': float(y_mean),
@@ -1109,13 +1162,19 @@ def train_upvote_predictor(model, df, test_size=0.2, validation=True):
         except Exception as e:
             logger.error(f"Error saving normalization parameters: {e}")
 
+        # Return the model and parameters
+        logger.info("Upvote predictor training process completed successfully.")
         return predictor, y_mean, y_std
 
     except Exception as e:
-        logger.error(f"Unexpected error in upvote predictor training: {e}")
+        logger.error(f"Unexpected error during model training: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None, None, None
+
+    finally:
+        # Cleanup or final logging
+        logger.info("Upvote predictor training process finished.")
 
 
 def generate_synthetic_hn_data(base_data, additional_samples=1000):
@@ -1351,9 +1410,18 @@ def create_upvote_enhanced_embedding(title, model, upvotes=None):
         return np.zeros(model.vector_size + (6 if upvotes is not None else 4))
 
 
-def train_hacker_news_upvote_predictor(model, df):
+def train_hacker_news_upvote_predictor(model, df, test_size=0.2, validation=True):
     """
     Train upvote predictor using Hacker News dataset with enhanced error handling and logging
+
+    Args:
+        model: Word2Vec model with embeddings
+        df: DataFrame with titles and upvotes
+        test_size: Fraction of data to use for testing
+        validation: Whether to use validation set (if False, use all for training)
+
+    Returns:
+        Trained predictor model, y_mean, y_std (normalization parameters)
     """
     # Get logger
     logger = logging.getLogger(__name__)
@@ -1396,7 +1464,7 @@ def train_hacker_news_upvote_predictor(model, df):
 
         if not X:
             logger.error("No valid embeddings created. Cannot train model.")
-            return None
+            return None, None, None
 
         try:
             X = np.array(X)
@@ -1404,14 +1472,16 @@ def train_hacker_news_upvote_predictor(model, df):
 
             logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
 
-            # Log transform target variable
-            y_log = np.log1p(y)
-            y_normalized = (y_log - np.mean(y_log)) / np.std(y_log)
+            # Alternative normalization approach
+            y_log = np.log1p(y)  # Keep log transform
+            y_mean = np.mean(y_log)
+            y_std = np.std(y_log)
+            y_normalized = (y_log - y_mean) / y_std
 
             logger.info("Splitting data into train/test sets")
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y_normalized, test_size=0.2, random_state=42
+                X, y_normalized, test_size=test_size, random_state=42
             )
 
             logger.info(f"Train set: {X_train.shape[0]} samples, Test set: {X_test.shape[0]} samples")
@@ -1479,10 +1549,10 @@ def train_hacker_news_upvote_predictor(model, df):
                     test_loss = criterion(test_outputs, y_test)
 
                     # Denormalize predictions
-                    train_preds_orig = np.expm1(train_outputs.numpy() * np.std(y_log) + np.mean(y_log))
-                    train_true_orig = np.expm1(y_train.numpy() * np.std(y_log) + np.mean(y_log))
-                    test_preds_orig = np.expm1(test_outputs.numpy() * np.std(y_log) + np.mean(y_log))
-                    test_true_orig = np.expm1(y_test.numpy() * np.std(y_log) + np.mean(y_log))
+                    train_preds_orig = np.expm1(train_outputs.numpy() * y_std + y_mean)
+                    train_true_orig = np.expm1(y_train.numpy() * y_std + y_mean)
+                    test_preds_orig = np.expm1(test_outputs.numpy() * y_std + y_mean)
+                    test_true_orig = np.expm1(y_test.numpy() * y_std + y_mean)
 
                     # Calculate RMSE
                     train_rmse = np.sqrt(np.mean((train_preds_orig - train_true_orig) ** 2))
@@ -1550,19 +1620,375 @@ def train_hacker_news_upvote_predictor(model, df):
             except Exception as plot_error:
                 logger.warning(f"Could not create training plots: {plot_error}")
 
-            return predictor
+            return predictor, y_mean, y_std  # Return all three values
 
         except Exception as training_error:
             logger.error(f"Error during model training: {training_error}")
             import traceback
             logger.error(traceback.format_exc())
-            return None
+            return None, None, None  # Return three None values
 
     except Exception as e:
         logger.error(f"Unexpected error in upvote predictor training: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return None
+        return None, None, None  # Return three None values
+
+
+def resume_upvote_predictor_training(model, df=None, load_cached_embeddings=True, test_size=0.2):
+    """
+    Resume training from already created embeddings
+
+    Args:
+        model: Word2Vec model with embeddings (can be None if load_cached_embeddings is True)
+        df: DataFrame with titles and upvotes (can be None if load_cached_embeddings is True)
+        load_cached_embeddings: Whether to load cached embeddings from disk
+        test_size: Fraction of data to use for testing
+
+    Returns:
+        Trained predictor model, y_mean, y_std (normalization parameters)
+    """
+    # Get logger
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Skip embedding creation and load from disk
+        logger.info("Loading cached embeddings from disk...")
+
+        X = None
+        y = None
+
+        try:
+            # Try loading pickled embeddings first (faster)
+            import pickle
+            with open('document_embeddings.pkl', 'rb') as f:
+                data = pickle.load(f)
+                X = data['X']
+                y = data['y']
+            logger.info(f"Successfully loaded embeddings from pickle file")
+        except Exception as e:
+            logger.warning(f"Could not load pickled embeddings: {e}")
+
+            # Try loading numpy arrays as fallback
+            try:
+                X = np.load('X_embeddings.npy')
+                y = np.load('y_values.npy')
+                logger.info(f"Successfully loaded embeddings from numpy files")
+            except Exception as e2:
+                logger.error(f"Could not load numpy embeddings: {e2}")
+
+                if not load_cached_embeddings:
+                    # If we can't load cached and aren't forced to, use existing X, y values in memory
+                    # This assumes X and y are already created in memory
+                    logger.info("Using in-memory embeddings")
+                else:
+                    raise ValueError("No embeddings available. Please run full training first.")
+
+        logger.info(f"Loaded embeddings with shapes: X={X.shape}, y={y.shape}")
+
+        # Robust log transform and normalization
+        y_log = np.log1p(y)
+        y_mean = np.mean(y_log)
+        y_std = np.std(y_log)
+        y_normalized = (y_log - y_mean) / y_std
+
+        logger.info(f"Normalized y values with mean={y_mean:.4f}, std={y_std:.4f}")
+
+        # Data splitting
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_normalized, test_size=test_size, random_state=42
+        )
+        logger.info(f"Train set: {X_train.shape[0]}, Test set: {X_test.shape[0]}")
+
+        # Convert to tensors
+        X_train = torch.FloatTensor(X_train)
+        y_train = torch.FloatTensor(y_train).unsqueeze(1)
+        X_test = torch.FloatTensor(X_test)
+        y_test = torch.FloatTensor(y_test).unsqueeze(1)
+
+        # Create enhanced predictor
+        logger.info(f"Initializing enhanced predictor with input dim: {X_train.shape[1]}")
+        predictor = EnhancedUpvotePredictor(X_train.shape[1])
+
+        # Advanced optimizer configuration
+        optimizer = optim.AdamW(
+            predictor.parameters(),
+            lr=0.0005,  # Stable learning rate
+            weight_decay=0.03,  # Regularization
+            betas=(0.9, 0.999)  # Adaptive momentum
+        )
+
+        # Learning rate scheduler with more aggressive reduction
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            verbose=True
+        )
+
+        # Training hyperparameters
+        patience = 15
+        best_rmse = float('inf')
+        patience_counter = 0
+        max_epochs = 200
+
+        # Metric tracking
+        train_losses, test_losses = [], []
+        train_rmses, test_rmses = [], []
+        prediction_stds = []
+        spearman_corrs = []
+
+        # Mini-batch training
+        batch_size = 128
+        train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True
+        )
+
+        logger.info(f"Starting training with {max_epochs} max epochs")
+
+        for epoch in range(max_epochs):
+            # Training phase
+            predictor.train()
+            epoch_loss = 0.0
+            num_batches = 0
+
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+
+                # Forward pass
+                outputs = predictor(X_batch)
+
+                # Use standard MSE loss for simplicity
+                loss = torch.nn.functional.mse_loss(outputs, y_batch)
+
+                # Backward pass
+                loss.backward()
+
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(predictor.parameters(), max_norm=1.0)
+
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                num_batches += 1
+
+            avg_train_loss = epoch_loss / num_batches
+            train_losses.append(avg_train_loss)
+
+            # Evaluation phase
+            predictor.eval()
+            with torch.no_grad():
+                # Test set evaluation
+                test_outputs = predictor(X_test)
+                test_loss = torch.nn.functional.mse_loss(test_outputs, y_test)
+                test_losses.append(test_loss.item())
+
+                # Denormalize predictions
+                train_outputs = predictor(X_train)
+                train_preds_orig = np.expm1(train_outputs.cpu().numpy() * y_std + y_mean)
+                train_true_orig = np.expm1(y_train.cpu().numpy() * y_std + y_mean)
+                test_preds_orig = np.expm1(test_outputs.cpu().numpy() * y_std + y_mean)
+                test_true_orig = np.expm1(y_test.cpu().numpy() * y_std + y_mean)
+
+                # Calculate RMSE and prediction diversity
+                train_rmse = np.sqrt(np.mean((train_preds_orig - train_true_orig) ** 2))
+                test_rmse = np.sqrt(np.mean((test_preds_orig - test_true_orig) ** 2))
+                pred_std = np.std(test_preds_orig)
+
+                train_rmses.append(train_rmse)
+                test_rmses.append(test_rmse)
+                prediction_stds.append(pred_std)
+
+                # Rank correlation
+                from scipy.stats import spearmanr
+                corr, _ = spearmanr(test_preds_orig.flatten(), test_true_orig.flatten())
+                spearman_corrs.append(corr)
+
+                # Progress logging
+                if epoch % 5 == 0 or epoch == 0:  # Also log first epoch
+                    logger.info(f"Epoch {epoch + 1}/{max_epochs}")
+                    logger.info(f"Train Loss: {avg_train_loss:.6f}, Test Loss: {test_loss.item():.6f}")
+                    logger.info(f"Train RMSE: {train_rmse:.2f}, Test RMSE: {test_rmse:.2f}")
+                    logger.info(f"Prediction Std Dev: {pred_std:.4f}")
+                    logger.info(f"Spearman Correlation: {corr:.4f}")
+                    logger.info(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+
+                # Update learning rate
+                scheduler.step(test_loss.item())
+
+                # Model checkpoint
+                if test_rmse < best_rmse:
+                    improvement = (best_rmse - test_rmse) / best_rmse * 100 if best_rmse != float('inf') else 100
+                    best_rmse = test_rmse
+                    patience_counter = 0
+                    torch.save(predictor.state_dict(), 'best_predictor_model.pth')
+                    logger.info(f"New best model saved with RMSE: {best_rmse:.2f} (improved by {improvement:.2f}%)")
+                else:
+                    patience_counter += 1
+
+                # Early stopping
+                if patience_counter >= patience or pred_std < 0.01:
+                    logger.info(f"Stopping training at epoch {epoch + 1}")
+                    break
+
+        # Load best model
+        try:
+            predictor.load_state_dict(torch.load('best_predictor_model.pth'))
+            logger.info("Loaded best model")
+        except Exception as e:
+            logger.warning(f"Could not load best model: {e}")
+
+        # Create diagnostic plots
+        try:
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(20, 6))
+
+            # Loss plot
+            plt.subplot(1, 4, 1)
+            plt.plot(train_losses, label='Train Loss')
+            plt.plot(test_losses, label='Test Loss')
+            plt.title('Loss During Training')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+
+            # RMSE plot
+            plt.subplot(1, 4, 2)
+            plt.plot(train_rmses, label='Train RMSE')
+            plt.plot(test_rmses, label='Test RMSE')
+            plt.title('RMSE During Training')
+            plt.xlabel('Epoch')
+            plt.ylabel('RMSE')
+            plt.legend()
+
+            # Prediction Standard Deviation
+            plt.subplot(1, 4, 3)
+            plt.plot(prediction_stds)
+            plt.title('Prediction Std Dev')
+            plt.xlabel('Epoch')
+            plt.ylabel('Std Dev')
+
+            # Spearman Correlation
+            plt.subplot(1, 4, 4)
+            plt.plot(spearman_corrs)
+            plt.title('Spearman Rank Correlation')
+            plt.xlabel('Epoch')
+            plt.ylabel('Correlation')
+            plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+
+            plt.tight_layout()
+            plt.savefig('upvote_predictor_metrics.png')
+            logger.info("Saved training metrics plot")
+        except Exception as e:
+            logger.error(f"Error creating diagnostic plots: {e}")
+
+        # Save normalization parameters
+        try:
+            normalization_params = {
+                'y_mean': float(y_mean),
+                'y_std': float(y_std)
+            }
+            with open('normalization_params.json', 'w') as f:
+                import json
+                json.dump(normalization_params, f)
+            logger.info("Saved normalization parameters for inference")
+        except Exception as e:
+            logger.error(f"Error saving normalization parameters: {e}")
+
+        # Return the model and parameters
+        logger.info("Upvote predictor training process completed successfully.")
+        return predictor, y_mean, y_std
+
+    except Exception as e:
+        logger.error(f"Unexpected error during model training: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None, None
+
+
+import numpy as np
+import pickle
+import os
+import logging
+import sys
+
+
+def setup_logging():
+    """Set up basic logging"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('embedding_cache.log')
+        ]
+    )
+    return logging.getLogger(__name__)
+
+
+def cache_existing_embeddings():
+    """
+    Cache embeddings that might already exist in memory
+
+    This function tries to find X and y in the current globals() scope
+    and saves them to disk for future use
+    """
+    logger = setup_logging()
+    logger.info("Looking for existing embeddings in memory...")
+
+    # Try to access X and y from globals
+    import __main__
+
+    X = None
+    y = None
+
+    # Check different variable names that might contain embeddings
+    potential_X_names = ['X', 'embeddings', 'doc_vectors', 'X_all']
+    potential_y_names = ['y', 'upvotes', 'scores', 'y_all']
+
+    for x_name in potential_X_names:
+        if hasattr(__main__, x_name):
+            X = getattr(__main__, x_name)
+            logger.info(f"Found X embeddings in variable '{x_name}' with shape: {X.shape}")
+            break
+
+    for y_name in potential_y_names:
+        if hasattr(__main__, y_name):
+            y = getattr(__main__, y_name)
+            logger.info(f"Found y values in variable '{y_name}' with shape: {y.shape}")
+            break
+
+    if X is None or y is None:
+        logger.error("Could not find X and y in memory!")
+        return False
+
+    # Save as pickle for faster loading
+    try:
+        logger.info("Caching document embeddings to disk...")
+        with open('document_embeddings.pkl', 'wb') as f:
+            pickle.dump({'X': X, 'y': y}, f)
+        logger.info(f"Saved document embeddings to document_embeddings.pkl")
+    except Exception as e:
+        logger.warning(f"Could not save embeddings as pickle: {e}")
+
+        # Fallback to numpy arrays
+        try:
+            np.save('X_embeddings.npy', X)
+            np.save('y_values.npy', y)
+            logger.info("Saved document embeddings as numpy arrays")
+        except Exception as e2:
+            logger.error(f"Failed to save embeddings: {e2}")
+            return False
+
+    logger.info("Embeddings successfully cached to disk.")
+    return True
+
+
+if __name__ == "__main__":
+    cache_existing_embeddings()
+
 
 
 # ----------------------
@@ -1697,7 +2123,8 @@ def main():
         # Train enhanced upvote predictor
         logger.info("Starting Enhanced Upvote Predictor Training")
         try:
-            predictor, y_mean, y_std = train_hacker_news_upvote_predictor(model, df)
+            predictor = train_hacker_news_upvote_predictor(model, df)
+            y_mean, y_std = None, None
 
             if predictor is not None:
                 logger.info("Enhanced Upvote Predictor Training Completed Successfully")

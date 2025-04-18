@@ -8,3 +8,10 @@ ssh_key
 ssh_key_fixed
 templates/plain.html
 __pycache__/main.cpython-311.pyc
+gpu-files/hn_files/logs/model_training.log
+gpu-files/hn_files/processed_hn_corpus.txt
+gpu-files/hn_files/df_200K.csv
+gpu-files/hn_files/best_predictor_model.pth
+gpu-files/hn_files/nohup.out
+gpu-files/hn_files/Word2Vec_HNCorpus_Assembly_1.1.py
+gpu-files/hn_files/HN_Corpus_Model_Weights.txt

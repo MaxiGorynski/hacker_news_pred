@@ -1,0 +1,74 @@
+Input Dimension: 106
+Model Architecture: EnhancedUpvotePredictor(
+  (model): Sequential(
+    (0): Linear(in_features=106, out_features=256, bias=True)
+    (1): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    (2): PReLU(num_parameters=1)
+    (3): Dropout(p=0.4, inplace=False)
+    (4): Linear(in_features=256, out_features=128, bias=True)
+    (5): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+    (6): SELU()
+    (7): Dropout(p=0.3, inplace=False)
+    (8): Linear(in_features=128, out_features=64, bias=True)
+    (9): PReLU(num_parameters=1)
+    (10): Linear(in_features=64, out_features=1, bias=True)
+    (11): ReLU()
+  )
+)
+
+Parameter: model.0.weight
+Shape: torch.Size([256, 106])
+Sample values: [-0.01201505  0.06950118  0.05970554  0.06739738 -0.07732658]
+
+Parameter: model.0.bias
+Shape: torch.Size([256])
+Sample values: [-0.09028544  0.08214037  0.00443036  0.05467425  0.00093289]
+
+Parameter: model.1.weight
+Shape: torch.Size([256])
+Sample values: [0.99997133 0.99644953 0.98962545 1.0111973  0.9961676 ]
+
+Parameter: model.1.bias
+Shape: torch.Size([256])
+Sample values: [-0.02333498 -0.02478486  0.01974249  0.02976504  0.02513164]
+
+Parameter: model.2.weight
+Shape: torch.Size([1])
+Sample values: [0.2559926]
+
+Parameter: model.4.weight
+Shape: torch.Size([128, 256])
+Sample values: [ 0.03556885  0.020451    0.00327871 -0.02810511 -0.02960668]
+
+Parameter: model.4.bias
+Shape: torch.Size([128])
+Sample values: [ 0.02750582 -0.03562737  0.00816286 -0.02607227  0.05561146]
+
+Parameter: model.5.weight
+Shape: torch.Size([128])
+Sample values: [0.9905576 0.99894   0.998099  0.9976454 0.9899684]
+
+Parameter: model.5.bias
+Shape: torch.Size([128])
+Sample values: [ 0.00148289  0.00980374  0.00502297 -0.00122387 -0.00031527]
+
+Parameter: model.8.weight
+Shape: torch.Size([64, 128])
+Sample values: [ 0.05977095 -0.01194903 -0.05560711 -0.08195659  0.05911533]
+
+Parameter: model.8.bias
+Shape: torch.Size([64])
+Sample values: [ 0.08396371 -0.0076628  -0.05411693 -0.00329856  0.06077619]
+
+Parameter: model.9.weight
+Shape: torch.Size([1])
+Sample values: [0.25446826]
+
+Parameter: model.10.weight
+Shape: torch.Size([1, 64])
+Sample values: [-0.06803293  0.07857516  0.07761704 -0.01418188  0.0165159 ]
+
+Parameter: model.10.bias
+Shape: torch.Size([1])
+Sample values: [-0.09831883]
+

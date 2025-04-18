@@ -629,7 +629,7 @@ class EnhancedUpvotePredictor(nn.Module):
         self.attention = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.Tanh(),
-            nn.Linear(64, 1),
+            nn.Linear(64, input_dim),  # Changed to match input_dim
             nn.Softmax(dim=1)
         )
 
@@ -671,10 +671,11 @@ class EnhancedUpvotePredictor(nn.Module):
         )
 
     def forward(self, x):
-        # Apply attention mechanism
-        batch_size = x.shape[0]
-        attention_weights = self.attention(x.unsqueeze(2).transpose(1, 2))
-        attended_input = torch.bmm(attention_weights.transpose(1, 2), x.unsqueeze(2)).squeeze(2)
+        # Apply attention mechanism (fixed version)
+        attention_weights = self.attention(x)
+
+        # Element-wise multiplication of input features with attention weights
+        attended_input = x * attention_weights
 
         # Residual connection - combine attended features with original
         enhanced_input = x + attended_input
@@ -1208,6 +1209,48 @@ def create_document_embedding(title, model, additional_features=True):
 
     return np.zeros(model.vector_size + 5)
 
+
+def cache_embeddings(X, y, logger=None):
+    """
+    Cache the document embeddings and labels to disk for faster reloading.
+
+    Parameters:
+    -----------
+    X : numpy.ndarray
+        Document embeddings with shape (n_samples, features)
+    y : numpy.ndarray
+        Upvote counts with shape (n_samples,)
+    logger : logging.Logger, optional
+        Logger for status messages
+    """
+    import numpy as np
+    import pickle
+    import os
+
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+
+    # Save as pickle for faster loading
+    try:
+        logger.info("Caching document embeddings to disk...")
+        with open('document_embeddings.pkl', 'wb') as f:
+            pickle.dump({'X': X, 'y': y}, f)
+        logger.info(f"Saved document embeddings to document_embeddings.pkl")
+    except Exception as e:
+        logger.warning(f"Could not save embeddings as pickle: {e}")
+
+        # Fallback to numpy arrays
+        try:
+            np.save('X_embeddings.npy', X)
+            np.save('y_values.npy', y)
+            logger.info("Saved document embeddings as numpy arrays")
+        except Exception as e2:
+            logger.error(f"Failed to save embeddings: {e2}")
+            return False
+
+    return True
+
 # ----------------------
 # 4. Hacker News Corpus
 # ----------------------
@@ -1654,7 +1697,7 @@ def main():
         # Train enhanced upvote predictor
         logger.info("Starting Enhanced Upvote Predictor Training")
         try:
-            predictor, y_mean, y_std = train_improved_upvote_predictor(model, df)
+            predictor, y_mean, y_std = train_hacker_news_upvote_predictor(model, df)
 
             if predictor is not None:
                 logger.info("Enhanced Upvote Predictor Training Completed Successfully")

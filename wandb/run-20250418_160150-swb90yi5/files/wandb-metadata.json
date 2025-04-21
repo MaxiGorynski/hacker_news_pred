@@ -1,0 +1,42 @@
+{
+  "os": "Windows-10-10.0.19045-SP0",
+  "python": "CPython 3.11.11",
+  "startedAt": "2025-04-18T15:01:51.028521Z",
+  "program": "c:\\Users\\Joshua\\Desktop\\Computer-Science-Courses\\Machine Learning Institute\\Week 1\\hacker_news_pred\\upload_to_wandb.py",
+  "codePath": "upload_to_wandb.py",
+  "git": {
+    "remote": "https://github.com/MaxiGorynski/hacker_news_pred.git",
+    "commit": "4db6e4b25453aecbc87ba6def899d09312ca4a2e"
+  },
+  "email": "joshua.oyekunle10@gmail.com",
+  "root": "C:\\Users\\Joshua\\Desktop\\Computer-Science-Courses\\Machine Learning Institute\\Week 1\\hacker_news_pred",
+  "host": "Legion-7",
+  "executable": "C:\\Users\\Joshua\\anaconda3\\envs\\MLI\\python.exe",
+  "codePathLocal": "upload_to_wandb.py",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "510770802688",
+      "used": "494506504192"
+    }
+  },
+  "memory": {
+    "total": "17024741376"
+  },
+  "cpu": {
+    "count": 8,
+    "countLogical": 16
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 3060 Laptop GPU",
+      "memoryTotal": "6442450944",
+      "cudaCores": 3840,
+      "architecture": "Ampere"
+    }
+  ],
+  "cudaVersion": "12.4"
+}

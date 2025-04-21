@@ -1,0 +1,16 @@
+{"time":"2025-04-18T16:01:51.081963+01:00","level":"INFO","msg":"stream: starting","core version":"0.19.9","symlink path":"C:\\Users\\Joshua\\Desktop\\Computer-Science-Courses\\Machine Learning Institute\\Week 1\\hacker_news_pred\\wandb\\run-20250418_160150-swb90yi5\\logs\\debug-core.log"}
+{"time":"2025-04-18T16:01:51.7057459+01:00","level":"INFO","msg":"created new stream","id":"swb90yi5"}
+{"time":"2025-04-18T16:01:51.7061598+01:00","level":"INFO","msg":"stream: started","id":"swb90yi5"}
+{"time":"2025-04-18T16:01:51.7061598+01:00","level":"INFO","msg":"handler: started","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:51.706674+01:00","level":"INFO","msg":"sender: started","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:51.7067727+01:00","level":"INFO","msg":"writer: Do: started","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:51.9419324+01:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-04-18T16:01:53.6217121+01:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-04-18T16:01:53.6217121+01:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-04-18T16:01:54.6324173+01:00","level":"INFO","msg":"handler: operation stats","stats":{"operations":[{"desc":"uploading artifact hacker-news-model","runtime_seconds":1.0097077,"subtasks":[{"desc":"HN_Corpus_Model_Weights.txt","runtime_seconds":0.2252781,"progress":"832.0KB/15.0MB"},{"desc":"best_predictor_model.pth","runtime_seconds":0.2252781,"progress":"278.9KB/278.9KB"}]}],"total_operations":1}}
+{"time":"2025-04-18T16:01:57.6227973+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-04-18T16:01:57.8189571+01:00","level":"INFO","msg":"stream: closing","id":"swb90yi5"}
+{"time":"2025-04-18T16:01:57.8189571+01:00","level":"INFO","msg":"handler: closed","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:57.8191663+01:00","level":"INFO","msg":"writer: Close: closed","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:57.8191663+01:00","level":"INFO","msg":"sender: closed","stream_id":"swb90yi5"}
+{"time":"2025-04-18T16:01:57.8191663+01:00","level":"INFO","msg":"stream: closed","id":"swb90yi5"}

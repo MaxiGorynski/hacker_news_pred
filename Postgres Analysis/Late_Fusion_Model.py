@@ -657,6 +657,7 @@ if __name__ == "__main__":
     import sqlalchemy
     
     # Assuming HNFeatureEngineer exists and works as before
+    from Feature_Engineering_2 import HNFeatureEngineer
     hn_engineer = HNFeatureEngineer("postgresql://sy91dhb:g5t49ao@178.156.142.230:5432/hd64m1ki")
     
     # Extract and process data
